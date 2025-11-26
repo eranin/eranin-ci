@@ -84,8 +84,12 @@ jobs:
       
           mkdir -p /tmp/buildx
       
-          # Write clean JSON (1 line, no indentation)
-          echo "{\"insecure-registries\": [\"$HOST\"]}" > /tmp/buildx/daemon.json
+          # Write PERFECT CLEAN JSON (no BOM, no newline)
+          printf '{"insecure-registries":["%s"]}' "$HOST" > /tmp/buildx/daemon.json
+      
+          echo "===== BuildKit Config ====="
+          cat /tmp/buildx/daemon.json
+          echo "==========================="
       
           docker buildx rm mybuilder >/dev/null 2>&1 || true
       
@@ -96,7 +100,6 @@ jobs:
             --config /tmp/buildx/daemon.json
       
           docker buildx inspect --bootstrap
-
 
       # ============================================================
       # LOGIN
