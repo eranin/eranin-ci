@@ -76,29 +76,27 @@ jobs:
           sleep 3
 
       # ============================================================
-      # BUILDX (FIXED JSON FORMAT)
+      # BUILDX WITH INSECURE REGISTRY (NO HEREDOC)
       # ============================================================
-      - name: Create Buildx Builder with Insecure Registry
+      - name: Create Buildx Builder
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
-
+      
           mkdir -p /tmp/buildx
-
-          # IMPORTANT: NO indentation, no leading space
-          cat > /tmp/buildx/daemon.json <<EOF
-{"insecure-registries": ["$HOST"]}
-EOF
-
-          # remove builder if exists
+      
+          # Write clean JSON (1 line, no indentation)
+          echo "{\"insecure-registries\": [\"$HOST\"]}" > /tmp/buildx/daemon.json
+      
           docker buildx rm mybuilder >/dev/null 2>&1 || true
-
+      
           docker buildx create \
             --name mybuilder \
             --driver docker-container \
             --use \
             --config /tmp/buildx/daemon.json
-
+      
           docker buildx inspect --bootstrap
+
 
       # ============================================================
       # LOGIN
