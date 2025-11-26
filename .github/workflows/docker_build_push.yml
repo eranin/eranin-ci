@@ -4,180 +4,137 @@ on:
   workflow_call:
     inputs:
       image_name:
-        description: 'Name of the Docker image (without registry URL)'
+        description: "Image name (no registry URL)"
         required: true
         type: string
-      
+
       dockerfile:
-        description: 'Path to Dockerfile relative to repository root'
+        description: "Dockerfile path"
         required: false
         type: string
-        default: 'Dockerfile'
-      
+        default: "Dockerfile"
+
       context:
-        description: 'Build context path'
+        description: "Build context"
         required: false
         type: string
-        default: '.'
-      
+        default: "."
+
       platforms:
-        description: 'Target platforms for multi-arch build (e.g., linux/amd64,linux/arm64)'
+        description: "Platforms for buildx"
         required: false
         type: string
-        default: 'linux/amd64'
-      
+        default: "linux/amd64"
+
       push_latest:
-        description: 'Whether to push latest tag'
+        description: "Push latest tag?"
         required: false
         type: boolean
         default: true
-      
+
       include_branch_tag:
-        description: 'Whether to include branch name in tags'
+        description: "Include branch as tag?"
         required: false
         type: boolean
         default: true
-      
+
       enable_cache:
-        description: 'Whether to enable build cache'
+        description: "Enable buildx cache?"
         required: false
         type: boolean
         default: true
-    
+
     secrets:
       REGISTRY_USERNAME:
-        description: 'Docker registry username'
         required: true
-      
       REGISTRY_PASSWORD:
-        description: 'Docker registry password or token'
         required: true
-      
       REGISTRY_URL:
-        description: 'Docker registry URL (e.g., registry.example.com)'
         required: true
-    
+
     outputs:
       image_tag:
-        description: 'Generated image tag'
         value: ${{ jobs.build-and-push.outputs.image_tag }}
-      
       image_full_name:
-        description: 'Full image name with tag'
         value: ${{ jobs.build-and-push.outputs.image_full_name }}
-      
       image_sha_tag:
-        description: 'Image tag with SHA'
         value: ${{ jobs.build-and-push.outputs.image_sha_tag }}
-      
       branch_name:
-        description: 'Sanitized branch name'
         value: ${{ jobs.build-and-push.outputs.branch_name }}
+
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    
-    # Export outputs for use in calling workflow
+
     outputs:
       image_tag: ${{ steps.tag.outputs.tag_date }}
       image_full_name: ${{ steps.meta.outputs.full_image_name }}
       image_sha_tag: ${{ steps.tag.outputs.tag_sha }}
       branch_name: ${{ steps.tag.outputs.branch }}
-    
+
     steps:
-      # Checkout the repository with full git history
-      # This is needed for accurate commit counting and git operations
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Fetch all history for all branches and tags
-      
-      # Generate intelligent tags based on date, commits, and git info
-      - name: Generate image tags
+          fetch-depth: 0
+
+      - name: Generate tags
         id: tag
         run: |
-          # Current date in YYYYMMDD format
           DATE=$(date +%Y%m%d)
-          
-          # Count commits made today (for versioning within the same day)
           DAILY_COUNT=$(git log --since="$(date +%Y-%m-%d) 00:00:00" --oneline | wc -l)
-          
-          # Get short commit SHA (7 characters)
           SHORT_SHA=$(git rev-parse --short=7 HEAD)
-          
-          # Sanitize branch name for use in Docker tags
-          # Replace invalid characters with hyphens
           BRANCH=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
-          
-          # Generate different tag formats
+
           TAG_DATE="${DATE}_${DAILY_COUNT}"
-          TAG_WITH_SHA="${DATE}_${DAILY_COUNT}-${SHORT_SHA}"
-          TAG_WITH_BRANCH="${BRANCH}-${DATE}_${DAILY_COUNT}"
-          
-          # Export tags for use in subsequent steps
+          TAG_SHA="${DATE}_${DAILY_COUNT}-${SHORT_SHA}"
+          TAG_BRANCH="${BRANCH}-${DATE}_${DAILY_COUNT}"
+
           echo "tag_date=${TAG_DATE}" >> $GITHUB_OUTPUT
-          echo "tag_sha=${TAG_WITH_SHA}" >> $GITHUB_OUTPUT
-          echo "tag_branch=${TAG_WITH_BRANCH}" >> $GITHUB_OUTPUT
+          echo "tag_sha=${TAG_SHA}" >> $GITHUB_OUTPUT
+          echo "tag_branch=${TAG_BRANCH}" >> $GITHUB_OUTPUT
           echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
-          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
-          
-          # Log generated tags for debugging
-          echo "=== Generated Tags ==="
-          echo "📅 Date tag: ${TAG_DATE}"
-          echo "🔖 SHA tag: ${TAG_WITH_SHA}"
-          echo "🌿 Branch tag: ${TAG_WITH_BRANCH}"
-          echo "📝 Commit: ${SHORT_SHA}"
-      
-      # Prepare Docker metadata for building
-      - name: Prepare Docker metadata
+
+      - name: Prepare metadata
         id: meta
         run: |
-          # Construct base image name
-          IMAGE_BASE="${{ secrets.REGISTRY_URL }}/${{ inputs.image_name }}"
-          
-          # Build tag list based on inputs
+          REGISTRY_HOST=$(echo "${{ secrets.REGISTRY_URL }}" | sed 's|http://||; s|https://||')
+          IMAGE_BASE="${REGISTRY_HOST}/${{ inputs.image_name }}"
+
           TAGS="${IMAGE_BASE}:${{ steps.tag.outputs.tag_date }}"
           TAGS="${TAGS},${IMAGE_BASE}:${{ steps.tag.outputs.tag_sha }}"
-          
-          # Add branch-specific tag if enabled
-          if [ "${{ inputs.include_branch_tag }}" == "true" ]; then
+
+          if [ "${{ inputs.include_branch_tag }}" = "true" ]; then
             TAGS="${TAGS},${IMAGE_BASE}:${{ steps.tag.outputs.tag_branch }}"
             TAGS="${TAGS},${IMAGE_BASE}:${{ steps.tag.outputs.branch }}"
           fi
-          
-          # Add latest tag if enabled
-          if [ "${{ inputs.push_latest }}" == "true" ]; then
+
+          if [ "${{ inputs.push_latest }}" = "true" ]; then
             TAGS="${TAGS},${IMAGE_BASE}:latest"
           fi
-          
+
+          echo "registry_host=${REGISTRY_HOST}" >> $GITHUB_OUTPUT
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
           echo "full_image_name=${IMAGE_BASE}:${{ steps.tag.outputs.tag_date }}" >> $GITHUB_OUTPUT
-          
-          echo "=== Docker Tags to Push ==="
-          echo "${TAGS}" | tr ',' '\n'
-      
-      # Set up QEMU for multi-platform builds
-      # Required for building ARM images on x86 runners
+
+          echo "=== Tags ==="
+          echo "$TAGS" | tr ',' '\n'
+
       - name: Set up QEMU
-        if: contains(inputs.platforms, 'arm') || contains(inputs.platforms, 'arm64')
         uses: docker/setup-qemu-action@v3
-      
-      # Set up Docker Buildx for advanced build features
-      # Enables multi-platform builds and caching
-      - name: Set up Docker Buildx
+        if: contains(inputs.platforms, 'arm')
+
+      - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
-      
-      # Login to Docker registry
-      - name: Login to Docker Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ secrets.REGISTRY_URL }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
-      
-      # Build and push Docker image with multiple tags
-      - name: Build and push Docker image
+
+      - name: Login to Registry (HTTP)
+        run: |
+          docker login "${{ steps.meta.outputs.registry_host }}" \
+            -u "${{ secrets.REGISTRY_USERNAME }}" \
+            -p "${{ secrets.REGISTRY_PASSWORD }}"
+
+      - name: Build & Push Image
         uses: docker/build-push-action@v5
         with:
           context: ${{ inputs.context }}
@@ -185,38 +142,19 @@ jobs:
           platforms: ${{ inputs.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          # Enable layer caching for faster builds (if enabled)
-          cache-from: ${{ inputs.enable_cache && format('type=registry,ref={0}/{1}:buildcache', secrets.REGISTRY_URL, inputs.image_name) || '' }}
-          cache-to: ${{ inputs.enable_cache && format('type=registry,ref={0}/{1}:buildcache,mode=max', secrets.REGISTRY_URL, inputs.image_name) || '' }}
-          # Add build metadata as labels
+
+          cache-from: ${{ inputs.enable_cache && format('type=registry,ref={0}/{1}:buildcache', steps.meta.outputs.registry_host, inputs.image_name) || '' }}
+          cache-to: ${{ inputs.enable_cache && format('type=registry,ref={0}/{1}:buildcache,mode=max', steps.meta.outputs.registry_host, inputs.image_name) || '' }}
+
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
-            org.opencontainers.image.version=${{ steps.tag.outputs.tag_date }}
-            org.opencontainers.image.ref.name=${{ github.ref_name }}
-          build-args: |
-            BUILD_DATE=${{ steps.tag.outputs.tag_date }}
-            VCS_REF=${{ github.sha }}
-            VERSION=${{ steps.tag.outputs.tag_date }}
-      
-      # Display summary of built images
-      - name: Image build summary
+
+      - name: Summary
         run: |
-          echo "## 🐳 Docker Image Built Successfully" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Image Name:** \`${{ inputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Primary Tag:** \`${{ steps.tag.outputs.tag_date }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit SHA:** \`${{ steps.tag.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** \`${{ steps.tag.outputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Platforms:** \`${{ inputs.platforms }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### All Tags:" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.meta.outputs.tags }}" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Pull Command:" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "docker pull ${{ steps.meta.outputs.full_image_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "## 🐳 Docker Build Success" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ inputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** \`${{ steps.tag.outputs.tag_date }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** \`${{ steps.meta.outputs.registry_host }}\`" >> $GITHUB_STEP_SUMMARY
+
