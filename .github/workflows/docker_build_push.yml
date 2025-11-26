@@ -1,4 +1,4 @@
-name: Docker Build and Push
+name: Docker Build & Push (HTTP Registry Support)
 
 on:
   workflow_call:
@@ -32,121 +32,113 @@ on:
         default: true
 
     secrets:
+      REGISTRY_URL:
+        required: true
       REGISTRY_USERNAME:
         required: true
       REGISTRY_PASSWORD:
         required: true
-      REGISTRY_URL:
-        required: true
-
-    outputs:
-      image_tag:
-        value: ${{ jobs.build-and-push.outputs.image_tag }}
-      image_full_name:
-        value: ${{ jobs.build-and-push.outputs.image_full_name }}
-      image_sha_tag:
-        value: ${{ jobs.build-and-push.outputs.image_sha_tag }}
-      branch_name:
-        value: ${{ jobs.build-and-push.outputs.branch_name }}
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
-    outputs:
-      image_tag: ${{ steps.tag.outputs.tag_date }}
-      image_full_name: ${{ steps.meta.outputs.full_image_name }}
-      image_sha_tag: ${{ steps.tag.outputs.tag_sha }}
-      branch_name: ${{ steps.tag.outputs.branch }}
-
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ==========================
-      #  TAG GENERATION
-      # ==========================
+      # ============================================
+      # SANITIZE REGISTRY URL (remove http://)
+      # ============================================
+      - name: Normalize registry host
+        id: reg
+        run: |
+          HOST=$(echo "${{ secrets.REGISTRY_URL }}" | sed 's|http://||; s|https://||')
+          echo "host=$HOST" >> $GITHUB_OUTPUT
+          echo "Registry host: $HOST"
+
+      # ============================================
+      # TAG GENERATION
+      # ============================================
       - name: Generate tags
         id: tag
         run: |
           DATE=$(date +%Y%m%d)
-          DAILY_COUNT=$(git log --since="$(date +%Y-%m-%d) 00:00:00" --oneline | wc -l)
-          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          COUNT=$(git log --since="$(date +%Y-%m-%d) 00:00" --oneline | wc -l)
+          SHA=$(git rev-parse --short=7 HEAD)
           BRANCH=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
 
-          echo "tag_date=${DATE}_${DAILY_COUNT}" >> $GITHUB_OUTPUT
-          echo "tag_sha=${DATE}_${DAILY_COUNT}-${SHORT_SHA}" >> $GITHUB_OUTPUT
-          echo "tag_branch=${BRANCH}-${DATE}_${DAILY_COUNT}" >> $GITHUB_OUTPUT
+          echo "tag_date=${DATE}_${COUNT}" >> $GITHUB_OUTPUT
+          echo "tag_sha=${DATE}_${COUNT}-${SHA}" >> $GITHUB_OUTPUT
+          echo "tag_branch=${BRANCH}-${DATE}_${COUNT}" >> $GITHUB_OUTPUT
           echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
-          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
 
-      # ==========================
-      #  PREPARE METADATA + REGISTRY HOST
-      # ==========================
+      # ============================================
+      # PREPARE DOCKER TAG LIST
+      # ============================================
       - name: Prepare metadata
         id: meta
         run: |
-          # REGISTRY_URL is already like: 103.162.20.16:5000
-          REGISTRY_HOST="${{ secrets.REGISTRY_URL }}"
+          HOST=${{ steps.reg.outputs.host }}
+          IMAGE_BASE="$HOST/${{ inputs.image_name }}"
 
-          IMAGE_BASE="${REGISTRY_HOST}/${{ inputs.image_name }}"
-
-          TAGS="${IMAGE_BASE}:${{ steps.tag.outputs.tag_date }}"
-          TAGS="${TAGS},${IMAGE_BASE}:${{ steps.tag.outputs.tag_sha }}"
+          TAGS="$IMAGE_BASE:${{ steps.tag.outputs.tag_date }}"
+          TAGS="$TAGS,$IMAGE_BASE:${{ steps.tag.outputs.tag_sha }}"
 
           if [ "${{ inputs.include_branch_tag }}" = "true" ]; then
-            TAGS="${TAGS},${IMAGE_BASE}:${{ steps.tag.outputs.tag_branch }}"
-            TAGS="${TAGS},${IMAGE_BASE}:${{ steps.tag.outputs.branch }}"
+            TAGS="$TAGS,$IMAGE_BASE:${{ steps.tag.outputs.tag_branch }}"
+            TAGS="$TAGS,$IMAGE_BASE:${{ steps.tag.outputs.branch }}"
           fi
 
           if [ "${{ inputs.push_latest }}" = "true" ]; then
-            TAGS="${TAGS},${IMAGE_BASE}:latest"
+            TAGS="$TAGS,$IMAGE_BASE:latest"
           fi
 
-          echo "registry_host=${REGISTRY_HOST}" >> $GITHUB_OUTPUT
-          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
-          echo "full_image_name=${IMAGE_BASE}:${{ steps.tag.outputs.tag_date }}" >> $GITHUB_OUTPUT
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "image_full=$IMAGE_BASE:${{ steps.tag.outputs.tag_date }}" >> $GITHUB_OUTPUT
 
-      # ==========================
-      #  FIX INSECURE REGISTRY (HTTP)
-      # ==========================
-      - name: Configure Docker for insecure registry
+          echo "Final docker tag list:"
+          echo "$TAGS" | tr ',' '\n'
+
+      # ============================================
+      # ENABLE INSECURE REGISTRY IN DOCKER DAEMON
+      # ============================================
+      - name: Configure Docker daemon (HTTP registry)
         run: |
-          REGISTRY_HOST="${{ secrets.REGISTRY_URL }}"
-          echo "{ \"insecure-registries\": [\"$REGISTRY_HOST\"] }" | sudo tee /etc/docker/daemon.json
+          HOST=${{ steps.reg.outputs.host }}
+          echo "{ \"insecure-registries\": [\"$HOST\"] }" | sudo tee /etc/docker/daemon.json
           sudo service docker restart
 
-      - name: Create Buildx builder with insecure registry
+      # ============================================
+      # CONFIGURE BUILDX BUILDER
+      # ============================================
+      - name: Create Buildx builder (insecure registry)
         run: |
-          REGISTRY_HOST="${{ secrets.REGISTRY_URL }}"
-
+          HOST=${{ steps.reg.outputs.host }}
           mkdir -p /tmp/buildx
           cat <<EOF > /tmp/buildx/daemon.json
-          {
-            "insecure-registries": ["$REGISTRY_HOST"]
-          }
+          { "insecure-registries": ["$HOST"] }
           EOF
 
           docker buildx rm mybuilder || true
           docker buildx create --name mybuilder --driver docker-container --use --config /tmp/buildx/daemon.json
           docker buildx inspect --bootstrap
 
-      # ==========================
-      #  LOGIN (HTTP)
-      # ==========================
-      - name: Login to Registry (HTTP)
+      # ============================================
+      # DOCKER LOGIN (HTTP)
+      # ============================================
+      - name: Login to Registry via HTTP
         run: |
-          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${{ secrets.REGISTRY_URL }}" \
-            --username "${{ secrets.REGISTRY_USERNAME }}" \
-            --password-stdin
-      
-      # ==========================
-      #  BUILD & PUSH
-      # ==========================
-      - name: Build & Push Image
+          HOST=${{ steps.reg.outputs.host }}
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "http://$HOST" \
+            -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
+
+      # ============================================
+      # BUILD & PUSH
+      # ============================================
+      - name: Build & Push Docker Image
         uses: docker/build-push-action@v5
         with:
           context: ${{ inputs.context }}
@@ -155,20 +147,15 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
 
-          cache-from: ${{ inputs.enable_cache && format('type=registry,ref={0}/{1}:buildcache', secrets.REGISTRY_URL, inputs.image_name) || '' }}
-          cache-to: ${{ inputs.enable_cache && format('type=registry,ref={0}/{1}:buildcache,mode=max', secrets.REGISTRY_URL, inputs.image_name) || '' }}
+          cache-from: ${{ inputs.enable_cache && format('type=registry,ref=http://{0}/{1}:buildcache', steps.reg.outputs.host, inputs.image_name) || '' }}
+          cache-to: ${{ inputs.enable_cache && format('type=registry,ref=http://{0}/{1}:buildcache,mode=max', steps.reg.outputs.host, inputs.image_name) || '' }}
 
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
-
-      # ==========================
-      #  SUMMARY
-      # ==========================
+      # ============================================
+      # SUMMARY
+      # ============================================
       - name: Summary
         run: |
-          echo "## 🐳 Docker Build OK" >> $GITHUB_STEP_SUMMARY
+          echo "## 🐳 Docker Image Built & Pushed" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** ${{ inputs.image_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Registry:** ${{ steps.meta.outputs.registry_host }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Primary tag:** ${{ steps.tag.outputs.tag_date }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** ${{ steps.reg.outputs.host }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Primary Tag:** ${{ steps.tag.outputs.tag_date }}" >> $GITHUB_STEP_SUMMARY
