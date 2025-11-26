@@ -115,7 +115,7 @@ jobs:
       # ==========================
       - name: Allow insecure registry
         run: |
-          REGISTRY_HOST="${{ secrets.REGISTRY_URL }}"
+          REGISTRY_HOST=$(echo "${{ secrets.REGISTRY_URL }}" | sed 's|http://||; s|https://||')
           echo "{ \"insecure-registries\": [\"$REGISTRY_HOST\"] }" | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
 
