@@ -163,8 +163,11 @@ jobs:
       - name: Summary
         run: |
           echo "## 🐳 Docker Build OK" >> $GITHUB_STEP_SUMMARY
-          echo "**Image name:** \`${{ inputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Registry:** \`${{ steps.meta.outputs.registry_host }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Full Image:** \`${{ steps.meta.outputs.full_image_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**SHA Tag:** \`${{ steps.tag.outputs.tag_sha }}\`" >> $GITHUB_STEP_SUMMARY
+      
+          echo "**Image Name:** \`${{ inputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag (date):** \`${{ steps.tag.outputs.tag_date }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag (sha):** \`${{ steps.tag.outputs.tag_sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ steps.tag.outputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
+
+
 
