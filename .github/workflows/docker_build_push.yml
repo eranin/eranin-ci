@@ -66,30 +66,36 @@ jobs:
           echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
 
       # ============================================================
-      # DOCKER DAEMON INSECURE
+      # DOCKER DAEMON INSECURE REGISTRY
       # ============================================================
       - name: Configure Docker insecure registry
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
           echo "{\"insecure-registries\": [\"$HOST\"]}" | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
-          sleep 3
+          sleep 2
 
       # ============================================================
-      # BUILDX WITH INSECURE REGISTRY (NO HEREDOC)
+      # BUILDX CONFIG (TOML REQUIRED!)
       # ============================================================
-      - name: Create Buildx Builder
+      - name: Create Buildx Builder (TOML config)
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
       
           mkdir -p /tmp/buildx
       
-          # Write PERFECT CLEAN JSON (no BOM, no newline)
-          printf '{"insecure-registries":["%s"]}' "$HOST" > /tmp/buildx/daemon.json
+          cat <<'EOF' > /tmp/buildx/buildkit.toml
+          [registry."__HOST__"]
+            http = true
+            insecure = true
+          EOF
       
-          echo "===== BuildKit Config ====="
-          cat /tmp/buildx/daemon.json
-          echo "==========================="
+          # replace placeholder
+          sed -i "s|__HOST__|$HOST|g" /tmp/buildx/buildkit.toml
+      
+          echo "===== BuildKit Config (TOML) ====="
+          cat /tmp/buildx/buildkit.toml
+          echo "=================================="
       
           docker buildx rm mybuilder >/dev/null 2>&1 || true
       
@@ -97,14 +103,14 @@ jobs:
             --name mybuilder \
             --driver docker-container \
             --use \
-            --config /tmp/buildx/daemon.json
+            --config /tmp/buildx/buildkit.toml
       
           docker buildx inspect --bootstrap
 
       # ============================================================
-      # LOGIN
+      # DOCKER LOGIN (HTTP)
       # ============================================================
-      - name: Login to Registry (HTTP)
+      - name: Login to Registry
         run: |
           echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login \
             "http://${{ secrets.REGISTRY_URL }}" \
@@ -137,7 +143,7 @@ jobs:
           echo "full_image_name=${IMAGE_BASE}:${{ steps.tag.outputs.tag_date }}" >> $GITHUB_OUTPUT
 
       # ============================================================
-      # BUILD & PUSH
+      # BUILD & PUSH (Buildx)
       # ============================================================
       - name: Build & Push Image
         uses: docker/build-push-action@v5
