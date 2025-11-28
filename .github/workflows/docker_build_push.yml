@@ -38,9 +38,8 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      image_tag: ${{ steps.tag.outputs.tag_date }}
+      image_tag: ${{ steps.tag.outputs.tag }}
       image_full_name: ${{ steps.meta.outputs.full_image_name }}
-      image_sha_tag: ${{ steps.tag.outputs.tag_sha }}
       branch_name: ${{ steps.tag.outputs.branch }}
 
     steps:
@@ -56,17 +55,16 @@ jobs:
         id: tag
         run: |
           DATE=$(date +%Y%m%d)
-          DAILY_COUNT=$(git log --since="$(date +%Y-%m-%d) 00:00:00" --oneline | wc -l)
-          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          COUNT=$(git rev-list --count HEAD)
           BRANCH=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          TAG="${DATE}_${COUNT}"
 
-          echo "tag_date=${DATE}_${DAILY_COUNT}" >> $GITHUB_OUTPUT
-          echo "tag_sha=${DATE}_${DAILY_COUNT}-${SHORT_SHA}" >> $GITHUB_OUTPUT
-          echo "tag_branch=${BRANCH}-${DATE}_${DAILY_COUNT}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+          echo "Tag generated: ${TAG}"
 
       # ============================================================
-      # DOCKER DAEMON INSECURE REGISTRY
+      # DOCKER CONFIG
       # ============================================================
       - name: Configure Docker insecure registry
         run: |
@@ -75,46 +73,25 @@ jobs:
           sudo systemctl restart docker
           sleep 2
 
-      # ============================================================
-      # BUILDX CONFIG (TOML REQUIRED!)
-      # ============================================================
-      - name: Create Buildx Builder (TOML config)
+      - name: Buildx config
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
-      
           mkdir -p /tmp/buildx
-      
-          cat <<'EOF' > /tmp/buildx/buildkit.toml
-          [registry."__HOST__"]
+          cat <<EOF > /tmp/buildx/buildkit.toml
+          [registry."$HOST"]
             http = true
             insecure = true
           EOF
-      
-          # replace placeholder
-          sed -i "s|__HOST__|$HOST|g" /tmp/buildx/buildkit.toml
-      
-          echo "===== BuildKit Config (TOML) ====="
-          cat /tmp/buildx/buildkit.toml
-          echo "=================================="
-      
-          docker buildx rm mybuilder >/dev/null 2>&1 || true
-      
-          docker buildx create \
-            --name mybuilder \
-            --driver docker-container \
-            --use \
-            --config /tmp/buildx/buildkit.toml
-      
+
+          docker buildx rm builder 2>/dev/null || true
+          docker buildx create --name builder --driver docker-container --use --config /tmp/buildx/buildkit.toml
           docker buildx inspect --bootstrap
 
-      # ============================================================
-      # DOCKER LOGIN (HTTP)
-      # ============================================================
-      - name: Login to Registry
+      - name: Login to registry (HTTP)
         run: |
           echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login \
             "http://${{ secrets.REGISTRY_URL }}" \
-            --username "${{ secrets.REGISTRY_USERNAME }}" \
+            -u "${{ secrets.REGISTRY_USERNAME }}" \
             --password-stdin
 
       # ============================================================
@@ -124,28 +101,16 @@ jobs:
         id: meta
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
+          TAG="${{ steps.tag.outputs.tag }}"
           IMAGE_BASE="${HOST}/${{ inputs.image_name }}"
 
-          TAGS="${IMAGE_BASE}:${{ steps.tag.outputs.tag_date }}"
-          TAGS="${TAGS},${IMAGE_BASE}:${{ steps.tag.outputs.tag_sha }}"
-
-          if [ "${{ inputs.include_branch_tag }}" = "true" ]; then
-            TAGS="${TAGS},${IMAGE_BASE}:${{ steps.tag.outputs.tag_branch }}"
-            TAGS="${TAGS},${IMAGE_BASE}:${{ steps.tag.outputs.branch }}"
-          fi
-
-          if [ "${{ inputs.push_latest }}" = "true" ]; then
-            TAGS="${TAGS},${IMAGE_BASE}:latest"
-          fi
-
-          echo "registry_host=${HOST}" >> $GITHUB_OUTPUT
-          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
-          echo "full_image_name=${IMAGE_BASE}:${{ steps.tag.outputs.tag_date }}" >> $GITHUB_OUTPUT
+          echo "tags=${IMAGE_BASE}:${TAG},${IMAGE_BASE}:latest" >> $GITHUB_OUTPUT
+          echo "full_image_name=${IMAGE_BASE}:${TAG}" >> $GITHUB_OUTPUT
 
       # ============================================================
-      # BUILD & PUSH (Buildx)
+      # BUILD
       # ============================================================
-      - name: Build & Push Image
+      - name: Build and Push Image
         uses: docker/build-push-action@v5
         with:
           context: ${{ inputs.context }}
@@ -154,20 +119,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
 
-          cache-from: ${{ inputs.enable_cache && format('type=registry,ref={0}/{1}:buildcache', secrets.REGISTRY_URL, inputs.image_name) || '' }}
-          cache-to: ${{ inputs.enable_cache && format('type=registry,ref={0}/{1}:buildcache,mode=max', secrets.REGISTRY_URL, inputs.image_name) || '' }}
-
       # ============================================================
       # SUMMARY
       # ============================================================
       - name: Summary
         run: |
-          echo "## 🐳 Docker Build OK" >> $GITHUB_STEP_SUMMARY
-      
-          echo "**Image Name:** \`${{ inputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Tag (date):** \`${{ steps.tag.outputs.tag_date }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Tag (sha):** \`${{ steps.tag.outputs.tag_sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** \`${{ steps.tag.outputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
-
-
-
+          echo "## CI OK" >> $GITHUB_STEP_SUMMARY
+          echo "Tag: ${{ steps.tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
