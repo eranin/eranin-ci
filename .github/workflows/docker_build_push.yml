@@ -124,5 +124,5 @@ jobs:
       # ============================================================
       - name: Summary
         run: |
-          echo "## CI OK" >> $GITHUB_STEP_SUMMARY
+          echo "## Image tag" >> $GITHUB_STEP_SUMMARY
           echo "Tag: ${{ steps.tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
