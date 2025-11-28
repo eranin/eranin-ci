@@ -15,15 +15,6 @@ on:
       platforms:
         type: string
         default: "linux/amd64"
-      push_latest:
-        type: boolean
-        default: true
-      include_branch_tag:
-        type: boolean
-        default: true
-      enable_cache:
-        type: boolean
-        default: true
 
     secrets:
       REGISTRY_USERNAME:
@@ -37,43 +28,43 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
+    # CI will return the generated tag to the parent workflow
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
-      image_full_name: ${{ steps.meta.outputs.full_image_name }}
-      branch_name: ${{ steps.tag.outputs.branch }}
 
     steps:
 
+      # Checkout source code
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ============================================================
-      # TAGS
-      # ============================================================
-      - name: Generate tags
+      # ============================
+      # Generate deterministic tags
+      # ============================
+      - name: Generate Image Tag
         id: tag
         run: |
           DATE=$(date +%Y%m%d)
           COUNT=$(git rev-list --count HEAD)
-          BRANCH=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
           TAG="${DATE}_${COUNT}"
 
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
-          echo "Tag generated: ${TAG}"
+          echo "Generated tag: ${TAG}"
 
-      # ============================================================
-      # DOCKER CONFIG
-      # ============================================================
-      - name: Configure Docker insecure registry
+      # ============================
+      # Docker insecure registry
+      # ============================
+      - name: Configure Docker for HTTP Registry
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
           echo "{\"insecure-registries\": [\"$HOST\"]}" | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
-          sleep 2
 
-      - name: Buildx config
+      # ============================
+      # Buildx setup
+      # ============================
+      - name: Setup Buildx
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
           mkdir -p /tmp/buildx
@@ -83,33 +74,35 @@ jobs:
             insecure = true
           EOF
 
-          docker buildx rm builder 2>/dev/null || true
+          docker buildx rm builder || true
           docker buildx create --name builder --driver docker-container --use --config /tmp/buildx/buildkit.toml
           docker buildx inspect --bootstrap
 
-      - name: Login to registry (HTTP)
+      # ============================
+      # Login
+      # ============================
+      - name: Login to Registry
         run: |
           echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login \
             "http://${{ secrets.REGISTRY_URL }}" \
-            -u "${{ secrets.REGISTRY_USERNAME }}" \
-            --password-stdin
+            -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
 
-      # ============================================================
-      # METADATA
-      # ============================================================
-      - name: Prepare metadata
+      # ============================
+      # Metadata
+      # ============================
+      - name: Prepare Metadata
         id: meta
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
           TAG="${{ steps.tag.outputs.tag }}"
-          IMAGE_BASE="${HOST}/${{ inputs.image_name }}"
+          BASE="${HOST}/${{ inputs.image_name }}"
 
-          echo "tags=${IMAGE_BASE}:${TAG},${IMAGE_BASE}:latest" >> $GITHUB_OUTPUT
-          echo "full_image_name=${IMAGE_BASE}:${TAG}" >> $GITHUB_OUTPUT
+          echo "tags=${BASE}:${TAG},${BASE}:latest" >> $GITHUB_OUTPUT
+          echo "full_image_name=${BASE}:${TAG}" >> $GITHUB_OUTPUT
 
-      # ============================================================
-      # BUILD
-      # ============================================================
+      # ============================
+      # Build & Push
+      # ============================
       - name: Build and Push Image
         uses: docker/build-push-action@v5
         with:
@@ -119,10 +112,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
 
-      # ============================================================
-      # SUMMARY
-      # ============================================================
+      # ============================
+      # Summary
+      # ============================
       - name: Summary
         run: |
-          echo "## Image tag" >> $GITHUB_STEP_SUMMARY
+          echo "## Docker Build Completed" >> $GITHUB_STEP_SUMMARY
           echo "Tag: ${{ steps.tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
