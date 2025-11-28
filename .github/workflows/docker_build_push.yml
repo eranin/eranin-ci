@@ -5,16 +5,16 @@ on:
     inputs:
       image_name:
         required: true
-        type: string      # The image name without registry prefix
+        type: string      # Image name (without registry prefix)
       dockerfile:
         type: string
-        default: "Dockerfile"    # Custom Dockerfile path (optional)
+        default: "Dockerfile"    # Dockerfile path
       context:
         type: string
-        default: "."             # Build context (default: repo root)
+        default: "."             # Build context
       platforms:
         type: string
-        default: "linux/amd64"   # Build target platform(s)
+        default: "linux/amd64"   # Target platform(s)
 
     secrets:
       REGISTRY_USERNAME:
@@ -22,29 +22,28 @@ on:
       REGISTRY_PASSWORD:
         required: true
       REGISTRY_URL:
-        required: true           # Local registry: 103.162.20.16:5000
+        required: true           # Example: 103.162.20.16:5000
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
-    # Expose image tag back to the parent workflow (CI/CD chain)
+    # Expose the generated image tag to the parent workflow (CD)
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
 
     steps:
 
       # ------------------------------------------------------------
-      # 1) Checkout source code
+      # 1) Checkout repository
       # ------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # Needed for git logs (tag generation)
+          fetch-depth: 0           # Required for commit counting
 
       # ------------------------------------------------------------
-      # 2) Generate deterministic image tag
+      # 2) Generate a deterministic image tag
       # Format: YYYYMMDD_<commit_count>
-      # Example: 20250128_42
       # ------------------------------------------------------------
       - name: Generate Image Tag
         id: tag
@@ -53,29 +52,31 @@ jobs:
           COUNT=$(git rev-list --count HEAD)
           TAG="${DATE}_${COUNT}"
 
+          # IMPORTANT: This output is used by CD
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
           echo "Generated tag: ${TAG}"
 
       # ------------------------------------------------------------
-      # 3) Configure Docker daemon to allow insecure HTTP registry
-      # Required because registry at 103.x uses HTTP (no TLS)
+      # 3) Configure Docker daemon for insecure HTTP registry
       # ------------------------------------------------------------
       - name: Configure Docker for HTTP Registry
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
+
           echo "{\"insecure-registries\": [\"$HOST\"]}" | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
-          echo "Docker daemon configured for HTTP registry: $HOST"
+
+          echo "Docker configured for insecure registry: $HOST"
 
       # ------------------------------------------------------------
-      # 4) Setup Buildx builder with insecure registry config
-      # Necessary for multi-platform builds & HTTP push
+      # 4) Setup Buildx with HTTP registry support
       # ------------------------------------------------------------
       - name: Setup Buildx
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
-          mkdir -p /tmp/buildx
 
+          mkdir -p /tmp/buildx
           cat <<EOF > /tmp/buildx/buildkit.toml
           [registry."$HOST"]
             http = true
@@ -83,6 +84,7 @@ jobs:
           EOF
 
           docker buildx rm builder || true
+
           docker buildx create \
             --name builder \
             --driver docker-container \
@@ -91,9 +93,10 @@ jobs:
 
           docker buildx inspect --bootstrap
 
+          echo "Buildx builder initialized for HTTP registry"
+
       # ------------------------------------------------------------
-      # 5) Docker login (HTTP)
-      # Must use http:// prefix or login will attempt TLS
+      # 5) Login to registry (must use http://)
       # ------------------------------------------------------------
       - name: Login to Registry
         run: |
@@ -103,9 +106,7 @@ jobs:
             --password-stdin
 
       # ------------------------------------------------------------
-      # 6) Prepare metadata (tags, full path)
-      # Output:
-      #   tags -> "<registry>/<image>:<tag>,<registry>/<image>:latest"
+      # 6) Prepare image metadata
       # ------------------------------------------------------------
       - name: Prepare Metadata
         id: meta
@@ -114,15 +115,18 @@ jobs:
           TAG="${{ steps.tag.outputs.tag }}"
           BASE="${HOST}/${{ inputs.image_name }}"
 
+          # Output list of tags for Buildx
           echo "tags=${BASE}:${TAG},${BASE}:latest" >> $GITHUB_OUTPUT
+
+          # Full name for reference
           echo "full_image_name=${BASE}:${TAG}" >> $GITHUB_OUTPUT
 
-          echo "Generated tags:"
+          echo "Prepared Tags:"
           echo " - ${BASE}:${TAG}"
           echo " - ${BASE}:latest"
 
       # ------------------------------------------------------------
-      # 7) Build and push Docker image using Buildx
+      # 7) Build & Push image
       # ------------------------------------------------------------
       - name: Build and Push Image
         uses: docker/build-push-action@v5
@@ -134,10 +138,11 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
 
       # ------------------------------------------------------------
-      # 8) Summary output
+      # 8) Summary (shown in GitHub UI)
       # ------------------------------------------------------------
       - name: Summary
         run: |
           echo "## Docker Build Completed" >> $GITHUB_STEP_SUMMARY
-          echo "Image: ${{ secrets.REGISTRY_URL }}/${{ inputs.image_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "Tag:   ${{ steps.tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "Registry: ${{ secrets.REGISTRY_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "Image:    ${{ inputs.image_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "Tag:      ${{ steps.tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
