@@ -1,0 +1,57 @@
+name: SBOM Generate (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      source_path:
+        description: Path to scan for SBOM (relative to repo root)
+        type: string
+        default: "."
+      sbom_format:
+        description: "SBOM format: spdx | spdx-json | cyclonedx | cyclonedx-json"
+        type: string
+        default: "cyclonedx-json"
+      artifact_name:
+        description: Name of uploaded SBOM artifact
+        type: string
+        default: "sbom"
+      dependency_snapshot:
+        description: Submit SBOM to GitHub Dependency Submission API
+        type: boolean
+        default: false
+      attest:
+        description: Create a GitHub attestation for the generated SBOM
+        type: boolean
+        default: false
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate SBOM
+        id: sbom
+        uses: anchore/sbom-action@v0
+        with:
+          path: ${{ inputs.source_path }}
+          format: ${{ inputs.sbom_format }}
+          output-file: sbom.out
+          artifact-name: ${{ inputs.artifact_name }}
+          dependency-snapshot: ${{ inputs.dependency_snapshot }}
+          upload-artifact: true
+          upload-release-assets: false
+
+      - name: Attest SBOM
+        if: ${{ inputs.attest }}
+        uses: actions/attest-sbom@v3
+        with:
+          subject-path: ${{ inputs.source_path }}
+          sbom-path: sbom.out

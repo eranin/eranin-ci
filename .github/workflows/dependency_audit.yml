@@ -1,0 +1,44 @@
+name: Dependency Audit (OSV) (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      scan_args:
+        description: |
+          Arguments passed to OSV-Scanner (one per line). NOTE: --format and --output are managed by the underlying workflow.
+        type: string
+        default: |-
+          --recursive
+          ./
+      results_file_name:
+        type: string
+        default: "osv-results.sarif"
+      upload_sarif:
+        type: boolean
+        default: true
+      fail_on_vuln:
+        type: boolean
+        default: true
+      download_artifact:
+        description: Optional artifact to download before scanning (for preprocessing)
+        type: string
+        default: ""
+      matrix_property:
+        description: Optional unique identifier per matrix run (e.g., amd64-)
+        type: string
+        default: ""
+
+jobs:
+  osv:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.3.1
+    with:
+      scan-args: ${{ inputs.scan_args }}
+      results-file-name: ${{ inputs.results_file_name }}
+      upload-sarif: ${{ inputs.upload_sarif }}
+      fail-on-vuln: ${{ inputs.fail_on_vuln }}
+      download-artifact: ${{ inputs.download_artifact }}
+      matrix-property: ${{ inputs.matrix_property }}

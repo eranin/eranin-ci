@@ -1,0 +1,228 @@
+name: Code Quality (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runtime:
+        description: "Primary runtime (node | python | go | java | dotnet)"
+        required: true
+        type: string
+      working_directory:
+        description: Working directory (relative to repo root)
+        type: string
+        default: "."
+      node_version:
+        type: string
+        default: "20"
+      python_version:
+        type: string
+        default: "3.11"
+      go_version:
+        type: string
+        default: "1.22"
+      java_version:
+        type: string
+        default: "21"
+      dotnet_version:
+        type: string
+        default: "8.0.x"
+
+      run_lint:
+        type: boolean
+        default: true
+      run_tests:
+        type: boolean
+        default: true
+      run_coverage:
+        type: boolean
+        default: false
+
+      lint_command:
+        description: Optional override lint command
+        type: string
+        default: ""
+      test_command:
+        description: Optional override test command
+        type: string
+        default: ""
+      coverage_command:
+        description: Optional override coverage command
+        type: string
+        default: ""
+
+    outputs:
+      quality_status:
+        description: pass | fail
+        value: ${{ jobs.quality.outputs.quality_status }}
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      quality_status: ${{ steps.set_outputs.outputs.quality_status }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        if: ${{ inputs.runtime == 'node' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working_directory }}/package-lock.json
+
+      - name: Setup Python
+        if: ${{ inputs.runtime == 'python' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Setup Go
+        if: ${{ inputs.runtime == 'go' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+
+      - name: Setup Java
+        if: ${{ inputs.runtime == 'java' }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: maven
+
+      - name: Setup .NET
+        if: ${{ inputs.runtime == 'dotnet' }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: Install Dependencies (Node)
+        if: ${{ inputs.runtime == 'node' }}
+        working-directory: ${{ inputs.working_directory }}
+        run: npm ci
+
+      - name: Install Dependencies (Python)
+        if: ${{ inputs.runtime == 'python' }}
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Install Dependencies (Go)
+        if: ${{ inputs.runtime == 'go' }}
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          go env
+          go mod download
+
+      - name: Install Dependencies (Java)
+        if: ${{ inputs.runtime == 'java' }}
+        working-directory: ${{ inputs.working_directory }}
+        run: mvn -q -DskipTests dependency:go-offline
+
+      - name: Install Dependencies (.NET)
+        if: ${{ inputs.runtime == 'dotnet' }}
+        working-directory: ${{ inputs.working_directory }}
+        run: dotnet restore
+
+      - name: Lint
+        id: lint
+        if: ${{ inputs.run_lint }}
+        continue-on-error: true
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.lint_command }}" ]]; then
+            eval "${{ inputs.lint_command }}"
+            exit 0
+          fi
+          case "${{ inputs.runtime }}" in
+            node) npm run lint --if-present ;;
+            python) python -m pip install ruff && ruff check . ;;
+            go) gofmt -w . && git diff --exit-code ;;
+            java) mvn -q -DskipTests checkstyle:check ;;
+            dotnet) dotnet format --verify-no-changes ;;
+            *) echo "Unsupported runtime"; exit 2 ;;
+          esac
+
+      - name: Tests
+        id: tests
+        if: ${{ inputs.run_tests }}
+        continue-on-error: true
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.test_command }}" ]]; then
+            eval "${{ inputs.test_command }}"
+            exit 0
+          fi
+          case "${{ inputs.runtime }}" in
+            node) npm test --if-present ;;
+            python) python -m pip install pytest && pytest -q ;;
+            go) go test ./... ;;
+            java) mvn -q test ;;
+            dotnet) dotnet test ;;
+            *) echo "Unsupported runtime"; exit 2 ;;
+          esac
+
+      - name: Coverage
+        id: coverage
+        if: ${{ inputs.run_coverage }}
+        continue-on-error: true
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.coverage_command }}" ]]; then
+            eval "${{ inputs.coverage_command }}"
+            exit 0
+          fi
+          case "${{ inputs.runtime }}" in
+            node) npm test --if-present -- --coverage ;;
+            python) python -m pip install pytest coverage && coverage run -m pytest && coverage xml ;;
+            go) go test -coverprofile=coverage.out ./... ;;
+            java) mvn -q test jacoco:report ;;
+            dotnet) dotnet test /p:CollectCoverage=true ;;
+            *) echo "Unsupported runtime"; exit 2 ;;
+          esac
+
+      - name: Upload Coverage Artifacts (best-effort)
+        if: ${{ inputs.run_coverage }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ inputs.runtime }}
+          path: |
+            ${{ inputs.working_directory }}/coverage/**
+            ${{ inputs.working_directory }}/coverage.xml
+            ${{ inputs.working_directory }}/coverage.out
+            ${{ inputs.working_directory }}/**/target/site/jacoco/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Set Outputs
+        id: set_outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS="pass"
+          if [[ "${{ steps.lint.outcome }}" == "failure" ]]; then STATUS="fail"; fi
+          if [[ "${{ steps.tests.outcome }}" == "failure" ]]; then STATUS="fail"; fi
+          if [[ "${{ steps.coverage.outcome }}" == "failure" ]]; then STATUS="fail"; fi
+          echo "quality_status=$STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce Gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.set_outputs.outputs.quality_status }}" != "pass" ]]; then
+            echo "One or more quality checks failed." >&2
+            exit 1
+          fi

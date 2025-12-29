@@ -1,0 +1,201 @@
+name: Release Gate (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      require_main_branch:
+        description: Only allow running from the main branch (when not running from a tag)
+        type: boolean
+        default: true
+
+      main_branch:
+        description: Main branch name
+        type: string
+        default: "main"
+
+      require_tag:
+        description: Require the workflow to run from a git tag (recommended for production releases)
+        type: boolean
+        default: false
+
+      tag_pattern:
+        description: Regex pattern to validate tag names (only used when running from a tag)
+        type: string
+        default: "^v\\d+\\.\\d+\\.\\d+$"
+
+      required_checks:
+        description: |
+          Required check names (one per line). If provided, this workflow will verify these checks are present
+          and concluded as success for the current commit SHA.
+        type: string
+        default: ""
+
+      require_change_ticket:
+        description: Require an explicit change ticket identifier (passed via input)
+        type: boolean
+        default: false
+
+      change_ticket:
+        description: Change ticket identifier (e.g., CHG-1234). Required when require_change_ticket=true.
+        type: string
+        default: ""
+
+      change_ticket_pattern:
+        description: Regex pattern to validate change ticket identifiers
+        type: string
+        default: "^(CHG|INC|TASK)-\\d+$"
+
+    outputs:
+      gate_status:
+        description: pass | fail
+        value: ${{ jobs.gate.outputs.gate_status }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      checks: read
+
+    outputs:
+      gate_status: ${{ steps.out.outputs.gate_status }}
+
+    steps:
+      - name: Validate Ref Policy
+        id: ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="${GITHUB_REF}"
+
+          if [[ "$REF" == refs/tags/* ]]; then
+            TAG="${REF#refs/tags/}"
+            echo "ref_type=tag" >> "$GITHUB_OUTPUT"
+            echo "ref_value=$TAG" >> "$GITHUB_OUTPUT"
+            echo "Detected tag: $TAG"
+
+            if [[ "${{ inputs.require_tag }}" != "true" ]]; then
+              echo "require_tag=false; tag runs allowed."
+            fi
+
+            PATTERN='${{ inputs.tag_pattern }}'
+            if ! [[ "$TAG" =~ $PATTERN ]]; then
+              echo "Tag '$TAG' does not match required pattern: $PATTERN" >&2
+              exit 1
+            fi
+
+          elif [[ "$REF" == refs/heads/* ]]; then
+            BRANCH="${REF#refs/heads/}"
+            echo "ref_type=branch" >> "$GITHUB_OUTPUT"
+            echo "ref_value=$BRANCH" >> "$GITHUB_OUTPUT"
+            echo "Detected branch: $BRANCH"
+
+            if [[ "${{ inputs.require_tag }}" == "true" ]]; then
+              echo "This release requires a git tag, but workflow is running on branch '$BRANCH'." >&2
+              exit 1
+            fi
+
+            if [[ "${{ inputs.require_main_branch }}" == "true" ]]; then
+              if [[ "$BRANCH" != "${{ inputs.main_branch }}" ]]; then
+                echo "This release is restricted to '${{ inputs.main_branch }}', but is running on '$BRANCH'." >&2
+                exit 1
+              fi
+            fi
+
+          else
+            echo "Unsupported ref: $REF" >&2
+            exit 1
+          fi
+
+      - name: Validate Change Ticket
+        if: ${{ inputs.require_change_ticket }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TICKET="${{ inputs.change_ticket }}"
+          if [[ -z "$TICKET" ]]; then
+            echo "change_ticket is required when require_change_ticket=true" >&2
+            exit 1
+          fi
+          PATTERN='${{ inputs.change_ticket_pattern }}'
+          if ! [[ "$TICKET" =~ $PATTERN ]]; then
+            echo "change_ticket '$TICKET' does not match required pattern: $PATTERN" >&2
+            exit 1
+          fi
+          echo "Change ticket validated: $TICKET"
+
+      - name: Verify Required Checks (optional)
+        if: ${{ inputs.required_checks != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const requiredRaw = `${{ inputs.required_checks }}`.trim();
+            const required = requiredRaw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+
+            if (!required.length) {
+              core.info("No required checks provided.");
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const ref = context.sha;
+
+            core.info(`Verifying required checks for ${owner}/${repo}@${ref}`);
+            const res = await github.rest.checks.listForRef({
+              owner,
+              repo,
+              ref,
+              filter: 'latest',
+              per_page: 100
+            });
+
+            const runs = res.data.check_runs || [];
+            const byName = new Map();
+            for (const r of runs) byName.set(r.name, r);
+
+            const failures = [];
+            for (const name of required) {
+              const r = byName.get(name);
+              if (!r) {
+                failures.push(`Missing check run: ${name}`);
+                continue;
+              }
+              if (r.conclusion !== 'success') {
+                failures.push(`Check not successful: ${name} (conclusion=${r.conclusion})`);
+              }
+            }
+
+            if (failures.length) {
+              core.setFailed(`Release gate failed:\n- ${failures.join('\n- ')}`);
+            } else {
+              core.info(`All required checks are successful: ${required.join(', ')}`);
+            }
+
+      - name: Set Outputs
+        id: out
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "gate_status=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "gate_status=fail" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "## Release Gate"
+            echo ""
+            echo "- Ref: **${GITHUB_REF}**"
+            echo "- Status: **${{ steps.out.outputs.gate_status }}**"
+            if [[ "${{ inputs.require_change_ticket }}" == "true" ]]; then
+              echo "- Change Ticket: **${{ inputs.change_ticket }}**"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
