@@ -22,6 +22,10 @@ on:
       platforms:
         type: string
         default: "linux/amd64"    # Target build platforms
+      
+      build_args:
+        type: string
+        default: ""
 
     # ------------------------------------------------------------
     # Secrets from parent workflow
@@ -148,6 +152,7 @@ jobs:
           platforms: ${{ inputs.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: ${{ inputs.build_args }}
 
       # ------------------------------------------------------------
       # 8) Summary (GitHub UI)
