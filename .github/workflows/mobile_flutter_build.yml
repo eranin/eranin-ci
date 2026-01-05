@@ -26,17 +26,14 @@ on:
         type: string
         default: "."
 
-      # Optional: nơi bạn muốn đặt env.prod sau khi decode
       dotenv_target_path:
         type: string
         default: ".env"
 
-      # Optional: iOS signing bật/tắt
       ios_codesign:
         type: boolean
         default: false
 
-      # Optional: bundle id iOS để generate ExportOptions.plist (nếu bạn không cung cấp plist riêng)
       ios_bundle_id:
         type: string
         default: "com.eranin.etask"
@@ -47,7 +44,7 @@ on:
         default: "app-store"
 
     # ------------------------------------------------------------
-    # Secrets (caller truyền vào)
+    # Secrets
     # ------------------------------------------------------------
     secrets:
       # App env
@@ -78,7 +75,6 @@ on:
       IOS_KEYCHAIN_PASSWORD:
         required: false
 
-      # Optional: cung cấp ExportOptions.plist riêng (base64)
       IOS_EXPORT_OPTIONS_PLIST_BASE64:
         required: false
 
@@ -200,7 +196,6 @@ jobs:
           kp.parent.mkdir(parents=True, exist_ok=True)
           kp.write_bytes(base64.b64decode(os.environ["KP_B64"]))
 
-          # key.jks -> thử ghi vào android/app/key.jks (phổ biến) + android/key.jks (dự phòng)
           jks1 = wd / "android/app/key.jks"
           jks1.parent.mkdir(parents=True, exist_ok=True)
           jks1.write_bytes(base64.b64decode(os.environ["JKS_B64"]))
