@@ -63,13 +63,17 @@ Common secrets:
 - `REGISTRY_URL`
 - `REGISTRY_USERNAME`
 - `REGISTRY_PASSWORD`
-- `APPLE_CERT_P12_BASE64` (optional)
-- `APPLE_CERT_PASSWORD` (optional)
-- `APP_STORE_CONNECT_API_KEY_JSON` (optional)
+- `ENV_PROD_BASE64` (optional - base64 encoded .env file)
+- `ANDROID_GOOGLE_SERVICES_JSON_BASE64` (optional)
 - `ANDROID_KEYSTORE_BASE64` (optional)
-- `ANDROID_KEYSTORE_PASSWORD` (optional)
-- `ANDROID_KEY_ALIAS` (optional)
-- `ANDROID_KEY_PASSWORD` (optional)
+- `ANDROID_KEY_PROPERTIES_BASE64` (optional)
+- `IOS_GOOGLESERVICE_INFO_PLIST_BASE64` (optional)
+- `IOS_GOOGLEOAUTH_PLIST_BASE64` (optional)
+- `IOS_P12_BASE64` (optional)
+- `IOS_P12_PASSWORD` (optional)
+- `IOS_MOBILEPROVISION_BASE64` (optional)
+- `IOS_KEYCHAIN_PASSWORD` (optional)
+- `IOS_EXPORT_OPTIONS_PLIST_BASE64` (optional)
 
 ### 2) Use a workflow from Eranin CI
 Create a workflow in your project repository and call a reusable workflow via `uses:`.
@@ -170,11 +174,20 @@ jobs:
 
 ## 2) Flutter Mobile Build (Android/iOS)
 
-Builds Flutter mobile artifacts:
-- Android: **APK** or **AAB**
-- iOS: **IPA** (requires `macos-latest` runner)
+Builds Flutter mobile artifacts with full support for environment injection, Firebase configuration, and code signing:
+- Android: **APK** or **AAB** (with optional keystore signing)
+- iOS: **IPA** (with optional P12 certificate + provisioning profile signing)
 
-### Usage (Android only)
+### Features
+- **Deterministic versioning:** `YYYYMMDD.<commit_count>` format
+- **Environment injection:** Base64-encoded `.env` file support
+- **Firebase integration:** Automatic injection of `google-services.json` and `GoogleService-Info.plist`
+- **Google OAuth:** Optional `GoogleOAuth.plist` injection for iOS
+- **Android signing:** Keystore + key.properties injection for release builds
+- **iOS signing:** P12 certificate + provisioning profile + ExportOptions.plist support
+- **Flexible export:** Supports `app-store`, `ad-hoc`, and `development` export methods
+
+### Usage (Android only - minimal)
 ```yaml
 name: Build Mobile (Android)
 
@@ -192,13 +205,41 @@ jobs:
       platform: "android"
       flutter_version: "3.19.6"
       build_type: "release"
-      android_output: "apk"     # apk | appbundle
+      android_output: "apk"
       working_directory: "."
 ```
 
-### Usage (iOS only)
+### Usage (Android with signing + Firebase)
 ```yaml
-name: Build Mobile (iOS)
+name: Build Mobile (Android - Signed)
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  mobile:
+    uses: eranin/eranin-ci/.github/workflows/mobile_flutter_build.yml@v1
+    with:
+      platform: "android"
+      flutter_version: "3.19.6"
+      build_type: "release"
+      android_output: "appbundle"
+      working_directory: "."
+      dotenv_target_path: ".env"
+    secrets:
+      ENV_PROD_BASE64: ${{ secrets.ENV_PROD_BASE64 }}
+      ANDROID_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEY_PROPERTIES_BASE64: ${{ secrets.ANDROID_KEY_PROPERTIES_BASE64 }}
+```
+
+### Usage (iOS only - no codesign)
+```yaml
+name: Build Mobile (iOS - No Sign)
 
 on:
   workflow_dispatch:
@@ -213,12 +254,47 @@ jobs:
       platform: "ios"
       flutter_version: "3.19.6"
       build_type: "release"
+      ios_codesign: false
       working_directory: "."
+```
+
+### Usage (iOS with full signing)
+```yaml
+name: Build Mobile (iOS - Signed)
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  mobile:
+    uses: eranin/eranin-ci/.github/workflows/mobile_flutter_build.yml@v1
+    with:
+      platform: "ios"
+      flutter_version: "3.19.6"
+      build_type: "release"
+      ios_codesign: true
+      ios_bundle_id: "com.eranin.myapp"
+      ios_export_method: "app-store"
+      working_directory: "."
+      dotenv_target_path: ".env"
+    secrets:
+      ENV_PROD_BASE64: ${{ secrets.ENV_PROD_BASE64 }}
+      IOS_GOOGLESERVICE_INFO_PLIST_BASE64: ${{ secrets.IOS_GOOGLESERVICE_INFO_PLIST_BASE64 }}
+      IOS_GOOGLEOAUTH_PLIST_BASE64: ${{ secrets.IOS_GOOGLEOAUTH_PLIST_BASE64 }}
+      IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
+      IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+      IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
+      IOS_KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+      IOS_EXPORT_OPTIONS_PLIST_BASE64: ${{ secrets.IOS_EXPORT_OPTIONS_PLIST_BASE64 }}
 ```
 
 ### Usage (Android + iOS)
 ```yaml
-name: Build Mobile (Both)
+name: Build Mobile (Both Platforms)
 
 on:
   push:
@@ -235,31 +311,109 @@ jobs:
       flutter_version: "3.19.6"
       build_type: "release"
       android_output: "appbundle"
+      ios_codesign: true
+      ios_bundle_id: "com.eranin.myapp"
+      ios_export_method: "app-store"
       working_directory: "."
+      dotenv_target_path: ".env"
+    secrets:
+      ENV_PROD_BASE64: ${{ secrets.ENV_PROD_BASE64 }}
+      ANDROID_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEY_PROPERTIES_BASE64: ${{ secrets.ANDROID_KEY_PROPERTIES_BASE64 }}
+      IOS_GOOGLESERVICE_INFO_PLIST_BASE64: ${{ secrets.IOS_GOOGLESERVICE_INFO_PLIST_BASE64 }}
+      IOS_GOOGLEOAUTH_PLIST_BASE64: ${{ secrets.IOS_GOOGLEOAUTH_PLIST_BASE64 }}
+      IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
+      IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+      IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
+      IOS_KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+      IOS_EXPORT_OPTIONS_PLIST_BASE64: ${{ secrets.IOS_EXPORT_OPTIONS_PLIST_BASE64 }}
 ```
 
 ### Inputs
 | Name | Required | Type | Default | Description |
 |---|---:|---|---|---|
 | `flutter_version` | ❌ | string | `3.19.6` | Flutter SDK version |
-| `platform` | ❌ | string | `android` | `android` \| `ios` \| `both` |
-| `build_type` | ❌ | string | `release` | `debug` \| `release` |
-| `android_output` | ❌ | string | `apk` | `apk` \| `appbundle` |
+| `platform` | ❌ | string | `android` | Target platform: `android` \| `ios` \| `both` |
+| `build_type` | ❌ | string | `release` | Build type: `debug` \| `release` |
+| `android_output` | ❌ | string | `apk` | Android output format: `apk` \| `appbundle` |
 | `working_directory` | ❌ | string | `.` | App directory (monorepo support) |
+| `dotenv_target_path` | ❌ | string | `.env` | Target path for decoded .env file |
+| `ios_codesign` | ❌ | boolean | `false` | Enable iOS code signing |
+| `ios_bundle_id` | ❌ | string | `com.eranin.etask` | iOS bundle identifier (for ExportOptions.plist generation) |
+| `ios_export_method` | ❌ | string | `app-store` | iOS export method: `app-store` \| `ad-hoc` \| `development` |
+
+### Secrets
+| Name | Required | Description |
+|---|---:|---|
+| `ENV_PROD_BASE64` | ❌ | Base64-encoded production `.env` file |
+| `ANDROID_GOOGLE_SERVICES_JSON_BASE64` | ❌ | Base64-encoded `google-services.json` for Firebase Android |
+| `IOS_GOOGLESERVICE_INFO_PLIST_BASE64` | ❌ | Base64-encoded `GoogleService-Info.plist` for Firebase iOS |
+| `IOS_GOOGLEOAUTH_PLIST_BASE64` | ❌ | Base64-encoded `GoogleOAuth.plist` for Google Sign-In iOS |
+| `ANDROID_KEYSTORE_BASE64` | ❌ | Base64-encoded Android keystore (`.jks` file) |
+| `ANDROID_KEY_PROPERTIES_BASE64` | ❌ | Base64-encoded `key.properties` file |
+| `IOS_P12_BASE64` | ❌ | Base64-encoded iOS signing certificate (`.p12` file) |
+| `IOS_P12_PASSWORD` | ❌ | Password for the P12 certificate |
+| `IOS_MOBILEPROVISION_BASE64` | ❌ | Base64-encoded iOS provisioning profile |
+| `IOS_KEYCHAIN_PASSWORD` | ❌ | Password for the temporary build keychain |
+| `IOS_EXPORT_OPTIONS_PLIST_BASE64` | ❌ | Base64-encoded custom `ExportOptions.plist` (optional, auto-generated if not provided) |
 
 ### Outputs
 | Name | Description |
 |---|---|
-| `build_version` | Deterministic build version (e.g., `YYYYMMDD.<commit_count>`) |
+| `build_version` | Deterministic build version (e.g., `20251229.128`) |
 
 ### Artifacts
-- Android: `**/build/app/outputs/**/*.apk` and/or `**/build/app/outputs/**/*.aab`
-- iOS: `**/build/ios/ipa/*.ipa`
+Artifacts are uploaded with names including the build version:
+- **Android:** `android-<version>` containing `**/build/app/outputs/**/*.apk` and/or `**/build/app/outputs/**/*.aab`
+- **iOS:** `ios-<version>` containing `**/build/ios/ipa/*.ipa`
 
-### Optional: Mobile Signing (recommended for enterprise)
-Implement signing in the calling workflow (or extend this reusable workflow) using secrets:
-- Android keystore (`ANDROID_KEYSTORE_BASE64`, etc.)
-- iOS certificates + profiles (Fastlane `match` or App Store Connect API)
+### How Signing Works
+
+#### Android Signing (Release Only)
+When `build_type: release` and both `ANDROID_KEYSTORE_BASE64` and `ANDROID_KEY_PROPERTIES_BASE64` are provided:
+1. `key.properties` is written to `android/key.properties`
+2. Keystore is written to both `android/app/key.jks` and `android/key.jks` (for compatibility)
+3. Your `android/app/build.gradle` should reference these files for signing
+
+#### iOS Signing (Release Only)
+When `ios_codesign: true`, `build_type: release`, and all required iOS secrets are provided:
+1. A temporary keychain (`build.keychain-db`) is created
+2. P12 certificate is imported into the keychain
+3. Provisioning profile is installed to `~/Library/MobileDevice/Provisioning Profiles/`
+4. If `IOS_EXPORT_OPTIONS_PLIST_BASE64` is provided, it's used directly
+5. Otherwise, a minimal `ExportOptions.plist` is auto-generated using `ios_bundle_id` and `ios_export_method`
+6. Build runs with `flutter build ipa --release --export-options-plist=ios/ExportOptions.plist`
+
+If iOS signing is not configured, the build runs with `--no-codesign` flag.
+
+### Preparing Secrets
+
+#### Encode files to Base64
+```bash
+# .env file
+base64 -i .env.prod -o env_prod_base64.txt
+
+# Android
+base64 -i google-services.json -o google_services_base64.txt
+base64 -i key.jks -o keystore_base64.txt
+base64 -i key.properties -o key_properties_base64.txt
+
+# iOS
+base64 -i GoogleService-Info.plist -o google_service_info_base64.txt
+base64 -i GoogleOAuth.plist -o google_oauth_base64.txt
+base64 -i certificate.p12 -o p12_base64.txt
+base64 -i profile.mobileprovision -o mobileprovision_base64.txt
+base64 -i ExportOptions.plist -o export_options_base64.txt
+```
+
+#### Example `key.properties` (Android)
+```properties
+storePassword=your_store_password
+keyPassword=your_key_password
+keyAlias=your_key_alias
+storeFile=key.jks
+```
 
 ---
 
@@ -556,7 +710,7 @@ Recommended (production):
 
 ## Troubleshooting
 
-### Docker push: “Access Denied”
+### Docker push: "Access Denied"
 - Verify:
   - `REGISTRY_URL` (host/port correct)
   - HTTP vs HTTPS mismatch
@@ -571,9 +725,25 @@ Recommended (production):
 - Ensure `actions/checkout` uses `fetch-depth: 0`.
 
 ### iOS build fails
-- iOS requires `macos-latest`.
+- iOS requires `macos-latest` runner.
 - Ensure `flutter build ipa` is supported by your Flutter version.
-- Add signing only when you are ready to distribute to TestFlight/App Store.
+- Verify all iOS signing secrets are properly base64-encoded.
+- Check that `ios_bundle_id` matches your provisioning profile.
+- If using a custom `ExportOptions.plist`, ensure the provisioning profile UUID is correct.
+
+### Android signing fails
+- Ensure `key.properties` references the correct keystore path (`key.jks`).
+- Verify `storeFile` in `key.properties` matches the keystore filename.
+- Check that your `android/app/build.gradle` is configured to read signing config from `key.properties`.
+
+### .env file not found
+- Verify `ENV_PROD_BASE64` secret is set and properly base64-encoded.
+- Check `dotenv_target_path` matches where your app expects the `.env` file.
+
+### Firebase configuration missing
+- Ensure the appropriate `*_BASE64` secrets are set.
+- For Android: `ANDROID_GOOGLE_SERVICES_JSON_BASE64`
+- For iOS: `IOS_GOOGLESERVICE_INFO_PLIST_BASE64` and optionally `IOS_GOOGLEOAUTH_PLIST_BASE64`
 
 ---
 
