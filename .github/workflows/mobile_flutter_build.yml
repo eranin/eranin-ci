@@ -145,9 +145,12 @@ jobs:
           cache: true
 
       - name: Inject .env (optional)
-        if: ${{ secrets.ENV_PROD_BASE64 != '' }}
         shell: bash
         run: |
+          if [ -z "$ENV_B64" ]; then
+            echo "No ENV_PROD_BASE64 provided, skipping .env injection"
+            exit 0
+          fi
           python3 - <<'PY'
           import os, base64, pathlib
           wd = pathlib.Path(os.environ["WD"])
@@ -162,9 +165,12 @@ jobs:
           ENV_B64: ${{ secrets.ENV_PROD_BASE64 }}
 
       - name: Inject google-services.json (optional)
-        if: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 != '' }}
         shell: bash
         run: |
+          if [ -z "$GS_B64" ]; then
+            echo "No ANDROID_GOOGLE_SERVICES_JSON_BASE64 provided, skipping"
+            exit 0
+          fi
           python3 - <<'PY'
           import os, base64, pathlib
           wd = pathlib.Path(os.environ["WD"])
@@ -178,9 +184,13 @@ jobs:
           GS_B64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
 
       - name: Inject Android signing (optional - release only)
-        if: ${{ inputs.build_type == 'release' && secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEY_PROPERTIES_BASE64 != '' }}
+        if: inputs.build_type == 'release'
         shell: bash
         run: |
+          if [ -z "$KP_B64" ] || [ -z "$JKS_B64" ]; then
+            echo "No Android signing secrets provided, skipping"
+            exit 0
+          fi
           python3 - <<'PY'
           import os, base64, pathlib
           wd = pathlib.Path(os.environ["WD"])
@@ -249,9 +259,12 @@ jobs:
           cache: true
 
       - name: Inject .env (optional)
-        if: ${{ secrets.ENV_PROD_BASE64 != '' }}
         shell: bash
         run: |
+          if [ -z "$ENV_B64" ]; then
+            echo "No ENV_PROD_BASE64 provided, skipping .env injection"
+            exit 0
+          fi
           python3 - <<'PY'
           import os, base64, pathlib
           wd = pathlib.Path(os.environ["WD"])
@@ -266,9 +279,12 @@ jobs:
           ENV_B64: ${{ secrets.ENV_PROD_BASE64 }}
 
       - name: Inject GoogleService-Info.plist (optional)
-        if: ${{ secrets.IOS_GOOGLESERVICE_INFO_PLIST_BASE64 != '' }}
         shell: bash
         run: |
+          if [ -z "$PLIST_B64" ]; then
+            echo "No IOS_GOOGLESERVICE_INFO_PLIST_BASE64 provided, skipping"
+            exit 0
+          fi
           python3 - <<'PY'
           import os, base64, pathlib
           wd = pathlib.Path(os.environ["WD"])
@@ -282,9 +298,12 @@ jobs:
           PLIST_B64: ${{ secrets.IOS_GOOGLESERVICE_INFO_PLIST_BASE64 }}
 
       - name: Inject GoogleOAuth.plist (optional)
-        if: ${{ secrets.IOS_GOOGLEOAUTH_PLIST_BASE64 != '' }}
         shell: bash
         run: |
+          if [ -z "$PLIST_B64" ]; then
+            echo "No IOS_GOOGLEOAUTH_PLIST_BASE64 provided, skipping"
+            exit 0
+          fi
           python3 - <<'PY'
           import os, base64, pathlib
           wd = pathlib.Path(os.environ["WD"])
@@ -305,9 +324,17 @@ jobs:
       # iOS Codesign (optional)
       # -------------------------
       - name: Install iOS cert & provisioning (optional)
-        if: ${{ inputs.ios_codesign && inputs.build_type == 'release' && secrets.IOS_P12_BASE64 != '' && secrets.IOS_MOBILEPROVISION_BASE64 != '' && secrets.IOS_KEYCHAIN_PASSWORD != '' }}
+        id: ios_signing
+        if: inputs.ios_codesign && inputs.build_type == 'release'
         shell: bash
         run: |
+          # Check if all required secrets are provided
+          if [ -z "$P12_B64" ] || [ -z "$MP_B64" ] || [ -z "$IOS_KEYCHAIN_PASSWORD" ]; then
+            echo "iOS signing secrets not fully provided, skipping signing setup"
+            echo "signing_configured=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           set -euo pipefail
 
           KEYCHAIN=build.keychain-db
@@ -337,6 +364,7 @@ jobs:
           PY
           cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/"
 
+          echo "signing_configured=true" >> $GITHUB_OUTPUT
         env:
           P12_B64: ${{ secrets.IOS_P12_BASE64 }}
           IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
@@ -344,48 +372,54 @@ jobs:
           IOS_KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
 
       - name: Prepare ExportOptions.plist (optional)
-        if: ${{ inputs.ios_codesign && inputs.build_type == 'release' }}
+        if: inputs.ios_codesign && inputs.build_type == 'release'
         shell: bash
         run: |
+          # Skip if signing was not configured
+          if [ "${{ steps.ios_signing.outputs.signing_configured }}" != "true" ]; then
+            echo "Signing not configured, skipping ExportOptions.plist"
+            exit 0
+          fi
+
           set -euo pipefail
           WD="${{ inputs.working_directory }}"
           TARGET="$WD/ios/ExportOptions.plist"
           mkdir -p "$WD/ios"
 
-          if [ -n "${{ secrets.IOS_EXPORT_OPTIONS_PLIST_BASE64 }}" ]; then
+          if [ -n "$PLIST_B64" ]; then
             python3 - <<'PY'
-            import os, base64, pathlib
-            target = pathlib.Path(os.environ["TARGET"])
-            target.write_bytes(base64.b64decode(os.environ["PLIST_B64"]))
-            print(f"Wrote ExportOptions: {target}")
-            PY
+          import os, base64, pathlib
+          target = pathlib.Path(os.environ["TARGET"])
+          target.write_bytes(base64.b64decode(os.environ["PLIST_B64"]))
+          print(f"Wrote ExportOptions: {target}")
+          PY
           else
             # Generate minimal ExportOptions.plist
             python3 - <<'PY'
-            import os, pathlib
-            method = os.environ["METHOD"]
-            bundle_id = os.environ["BUNDLE_ID"]
-            target = pathlib.Path(os.environ["TARGET"])
+          import os, pathlib
+          method = os.environ["METHOD"]
+          bundle_id = os.environ["BUNDLE_ID"]
+          target = pathlib.Path(os.environ["TARGET"])
 
-            content = f'''<?xml version="1.0" encoding="UTF-8"?>
-            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-            <plist version="1.0">
+          content = f'''<?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>{method}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>stripSwiftSymbols</key><true/>
+            <key>compileBitcode</key><false/>
+            <key>destination</key><string>export</string>
+            <key>provisioningProfiles</key>
             <dict>
-              <key>method</key><string>{method}</string>
-              <key>signingStyle</key><string>manual</string>
-              <key>stripSwiftSymbols</key><true/>
-              <key>compileBitcode</key><false/>
-              <key>destination</key><string>export</string>
-              <key>provisioningProfiles</key>
-              <dict>
-                <key>{bundle_id}</key><string></string>
-              </dict>
+              <key>{bundle_id}</key><string></string>
             </dict>
-            </plist>
-            '''
-            target.write_text(content)
-            print(f"Generated ExportOptions: {target}")
-            PY
+          </dict>
+          </plist>
+          '''
+          target.write_text(content)
+          print(f"Generated ExportOptions: {target}")
+          PY
           fi
         env:
           TARGET: ${{ inputs.working_directory }}/ios/ExportOptions.plist
@@ -393,13 +427,13 @@ jobs:
           METHOD: ${{ inputs.ios_export_method }}
           BUNDLE_ID: ${{ inputs.ios_bundle_id }}
 
-      - name: Build iOS (Signed when configured)
-        if: ${{ inputs.ios_codesign && inputs.build_type == 'release' && secrets.IOS_P12_BASE64 != '' && secrets.IOS_MOBILEPROVISION_BASE64 != '' && secrets.IOS_KEYCHAIN_PASSWORD != '' }}
+      - name: Build iOS (Signed)
+        if: inputs.ios_codesign && inputs.build_type == 'release' && steps.ios_signing.outputs.signing_configured == 'true'
         working-directory: ${{ inputs.working_directory }}
         run: flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
 
       - name: Build iOS (No Codesign)
-        if: ${{ !(inputs.ios_codesign && inputs.build_type == 'release' && secrets.IOS_P12_BASE64 != '' && secrets.IOS_MOBILEPROVISION_BASE64 != '' && secrets.IOS_KEYCHAIN_PASSWORD != '') }}
+        if: "!inputs.ios_codesign || inputs.build_type != 'release' || steps.ios_signing.outputs.signing_configured != 'true'"
         working-directory: ${{ inputs.working_directory }}
         run: flutter build ipa --${{ inputs.build_type }} --no-codesign
 
