@@ -430,12 +430,22 @@ jobs:
       - name: Build iOS (No Codesign)
         if: "!inputs.ios_codesign || inputs.build_type != 'release' || steps.ios_signing.outputs.signing_configured != 'true'"
         working-directory: ${{ inputs.working_directory }}
-        run: flutter build ipa --${{ inputs.build_type }} --no-codesign
+        run: flutter build ios --${{ inputs.build_type }} --no-codesign
 
-      - name: Upload iOS Artifact
+      - name: Upload iOS Artifact (IPA)
+        if: inputs.ios_codesign && inputs.build_type == 'release' && steps.ios_signing.outputs.signing_configured == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ios-${{ needs.meta.outputs.version }}
           path: |
             **/build/ios/ipa/*.ipa
           if-no-files-found: error
+
+      - name: Upload iOS Artifact (No Codesign)
+        if: "!inputs.ios_codesign || inputs.build_type != 'release' || steps.ios_signing.outputs.signing_configured != 'true'"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ needs.meta.outputs.version }}
+          path: |
+            **/build/ios/iphoneos/*.app
+          if-no-files-found: warn
