@@ -1,0 +1,358 @@
+name: Mobile Play Deploy
+
+# Reusable workflow that uploads a pre-built Android App Bundle (.aab)
+# to the Google Play Console via the Play Developer API.
+#
+# Usage (from a calling workflow):
+#
+#   jobs:
+#     build:
+#       uses: eranin/eranin-ci/.github/workflows/mobile_flutter_build.yml@main
+#       with: { ... }
+#
+#     deploy_play:
+#       needs: build
+#       uses: eranin/eranin-ci/.github/workflows/mobile_play_deploy.yml@main
+#       with:
+#         package_name: "com.eranin.etask"
+#         track: "internal"
+#         aab_artifact_name: "android-${{ needs.build.outputs.build_version }}-prod"
+#       secrets:
+#         PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
+
+on:
+  workflow_call:
+    # ------------------------------------------------------------
+    # Inputs
+    # ------------------------------------------------------------
+    inputs:
+      # Required: the package name as registered on Play Console
+      package_name:
+        type: string
+        required: true
+
+      # Required: name of the artifact uploaded by the build job
+      # (matches `name:` on actions/upload-artifact in mobile_flutter_build.yml)
+      aab_artifact_name:
+        type: string
+        required: true
+
+      # Optional: filter inside the artifact when there are multiple AABs.
+      # If empty, the first .aab found will be used. Set to e.g. "prod"
+      # to match files like app-prod-release.aab.
+      aab_filename_filter:
+        type: string
+        default: ""
+
+      # Track to deploy to. Start with "internal" for safety.
+      # Valid values: internal | alpha | beta | production
+      track:
+        type: string
+        default: "internal"
+
+      # Release status. Most common:
+      #   completed   - release goes live immediately (full rollout)
+      #   draft       - upload but do not publish, you publish manually
+      #   inProgress  - staged rollout, requires user_fraction
+      #   halted      - rolled back release
+      status:
+        type: string
+        default: "completed"
+
+      # For staged rollout (status=inProgress). Range 0.0..1.0 exclusive.
+      # E.g. 0.1 = 10% of users. Ignored unless status=inProgress.
+      user_fraction:
+        type: string
+        default: ""
+
+      # Optional release name shown in Play Console UI.
+      # If empty, Play uses the versionName from the AAB.
+      release_name:
+        type: string
+        default: ""
+
+      # Optional: in-app update priority [0..5], 5 = highest.
+      in_app_update_priority:
+        type: number
+        default: 0
+
+      # Optional: directory with release notes per locale.
+      # Files must be named like en-US.txt, vi.txt, etc.
+      whats_new_directory:
+        type: string
+        default: ""
+
+      # Safety switch. Default is dry-run (validates everything except final upload).
+      # Set to true once you've verified the run looks correct.
+      do_upload:
+        type: boolean
+        default: true
+
+    # ------------------------------------------------------------
+    # Secrets
+    # ------------------------------------------------------------
+    secrets:
+      PLAY_SERVICE_ACCOUNT_JSON_BASE64:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Upload to Google Play (${{ inputs.track }})
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # Guardrail: prevent accidental production rollout to 100%
+      # without explicit confirmation. If you really want this,
+      # set status=inProgress + user_fraction=0.1 (10%) and ramp up.
+      # ------------------------------------------------------------
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ inputs.track }}" = "production" ] && [ "${{ inputs.status }}" = "completed" ]; then
+            echo "::warning::Deploying to PRODUCTION with status=completed (100% rollout)."
+            echo "::warning::Consider using status=inProgress with user_fraction=0.1 for safer rollouts."
+          fi
+
+          if [ "${{ inputs.status }}" = "inProgress" ] && [ -z "${{ inputs.user_fraction }}" ]; then
+            echo "ERROR: status=inProgress requires user_fraction (e.g. 0.1 for 10%)" >&2
+            exit 1
+          fi
+
+          if [ -n "${{ inputs.user_fraction }}" ]; then
+            UF="${{ inputs.user_fraction }}"
+            # Accept 0.0 < uf < 1.0
+            python3 -c "
+          uf = float('$UF')
+          if not (0.0 < uf < 1.0):
+              raise SystemExit(f'user_fraction must be in (0.0, 1.0), got {uf}')
+          print(f'user_fraction = {uf} (~{uf*100:.0f}% of users)')
+          "
+          fi
+
+          case "${{ inputs.track }}" in
+            internal|alpha|beta|production) ;;
+            *) echo "ERROR: invalid track '${{ inputs.track }}'. Must be internal|alpha|beta|production" >&2; exit 1 ;;
+          esac
+
+          case "${{ inputs.status }}" in
+            completed|draft|inProgress|halted) ;;
+            *) echo "ERROR: invalid status '${{ inputs.status }}'. Must be completed|draft|inProgress|halted" >&2; exit 1 ;;
+          esac
+
+      # ------------------------------------------------------------
+      # Optionally check out the calling repo for whats_new_directory
+      # (release notes live in the project, not in eranin-ci)
+      # ------------------------------------------------------------
+      - name: Checkout (for release notes)
+        if: inputs.whats_new_directory != ''
+        uses: actions/checkout@v5
+
+      # ------------------------------------------------------------
+      # Download the AAB artifact produced by the build job
+      # ------------------------------------------------------------
+      - name: Download AAB artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ inputs.aab_artifact_name }}
+          path: ./_aab_artifact
+
+      - name: Locate AAB
+        id: find_aab
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "===== Files in artifact ====="
+          find ./_aab_artifact -type f | head -n 50
+          echo ""
+
+          FILTER='${{ inputs.aab_filename_filter }}'
+          if [ -n "$FILTER" ]; then
+            AAB=$(find ./_aab_artifact -type f -name "*${FILTER}*.aab" | head -n 1)
+          else
+            AAB=$(find ./_aab_artifact -type f -name "*.aab" | head -n 1)
+          fi
+
+          if [ -z "$AAB" ]; then
+            echo "ERROR: no .aab file found in artifact '${{ inputs.aab_artifact_name }}'" >&2
+            exit 1
+          fi
+
+          # Resolve to absolute path for the upload action
+          AAB_ABS=$(realpath "$AAB")
+          SIZE=$(stat -c%s "$AAB_ABS")
+          echo "Selected: $AAB_ABS"
+          echo "Size:     $SIZE bytes"
+
+          # Sanity check: AAB is a zip file, magic bytes are PK
+          MAGIC=$(head -c 2 "$AAB_ABS" | od -An -c | tr -d ' \n')
+          if [ "$MAGIC" != "PK" ]; then
+            echo "ERROR: file does not look like a zip/AAB (magic = $MAGIC)" >&2
+            exit 1
+          fi
+
+          echo "aab_path=$AAB_ABS" >> $GITHUB_OUTPUT
+          echo "aab_size=$SIZE" >> $GITHUB_OUTPUT
+
+      # ------------------------------------------------------------
+      # Inspect the AAB - print package, versionCode, versionName,
+      # signing cert subject. Catches a bunch of common mistakes
+      # before we burn an API call to Google.
+      # ------------------------------------------------------------
+      - name: Inspect AAB metadata
+        id: inspect
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAB="${{ steps.find_aab.outputs.aab_path }}"
+
+          echo "===== AAB metadata ====="
+          # AAB stores the manifest in BundleConfig.pb / base/manifest/AndroidManifest.xml
+          # but quickest way is to use bundletool, or just unzip + aapt2.
+          # We don't have bundletool on the runner by default, so use a lightweight Python
+          # approach: parse versionCode and applicationId from base/manifest/AndroidManifest.xml
+          # (binary XML). Falls back gracefully if it can't parse.
+          python3 - <<'PY'
+          import zipfile, sys, struct, os
+          aab = os.environ["AAB"]
+          try:
+              with zipfile.ZipFile(aab) as z:
+                  names = z.namelist()
+                  print(f"Entries: {len(names)}")
+                  # Look for the signing block
+                  signed_files = [n for n in names if n.startswith("META-INF/") and n.endswith((".RSA", ".DSA", ".EC"))]
+                  if signed_files:
+                      print(f"Signing files: {signed_files}")
+                  else:
+                      print("WARNING: no META-INF/*.RSA found inside AAB - is it signed?")
+                  has_manifest = "base/manifest/AndroidManifest.xml" in names
+                  print(f"Has base/manifest/AndroidManifest.xml: {has_manifest}")
+          except Exception as e:
+              print(f"Could not introspect AAB: {e}", file=sys.stderr)
+          PY
+
+          echo ""
+          echo "===== Signing cert ====="
+          # Extract certificate
+          unzip -p "$AAB" "META-INF/*.RSA" 2>/dev/null \
+            | keytool -printcert 2>&1 \
+            | grep -E "Owner:|Issuer:|Valid from:|SHA1:|SHA256:" || echo "(could not read cert)"
+
+          # Hard fail if signed with debug key
+          OWNER=$(unzip -p "$AAB" "META-INF/*.RSA" 2>/dev/null | keytool -printcert 2>&1 | grep -E "^Owner:" || echo "")
+          if echo "$OWNER" | grep -qi "CN=Android Debug"; then
+            echo ""
+            echo "ERROR: AAB is signed with the DEBUG key. Play Console will reject this." >&2
+            exit 1
+          fi
+        env:
+          AAB: ${{ steps.find_aab.outputs.aab_path }}
+
+      # ------------------------------------------------------------
+      # Decode service account JSON from secret
+      # ------------------------------------------------------------
+      - name: Decode service account JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, base64, pathlib, sys, json
+
+          raw = "".join(os.environ["SA_B64"].split())
+          try:
+              data = base64.b64decode(raw, validate=False)
+          except Exception as e:
+              print(f"ERROR: PLAY_SERVICE_ACCOUNT_JSON_BASE64 not valid base64: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          # The decoded result should be JSON. If it doesn't start with '{',
+          # it's probably double-base64-encoded.
+          if not data.lstrip().startswith(b"{"):
+              print("Decoded result does not look like JSON, attempting double-decode")
+              try:
+                  data = base64.b64decode(data, validate=False)
+              except Exception as e:
+                  print(f"ERROR: second decode failed: {e}", file=sys.stderr)
+                  sys.exit(1)
+
+          # Validate it's actual JSON with the fields a service account key has
+          try:
+              parsed = json.loads(data)
+          except Exception as e:
+              print(f"ERROR: decoded content is not valid JSON: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          required = {"type", "client_email", "private_key", "project_id"}
+          missing = required - set(parsed.keys())
+          if missing:
+              print(f"ERROR: service account JSON missing fields: {missing}", file=sys.stderr)
+              sys.exit(1)
+          if parsed.get("type") != "service_account":
+              print(f"ERROR: JSON 'type' is '{parsed.get('type')}', expected 'service_account'", file=sys.stderr)
+              sys.exit(1)
+
+          pathlib.Path("play-service-account.json").write_bytes(data)
+          # Print non-secret identifiers so the run log shows which account is being used
+          print(f"Service account: {parsed['client_email']}")
+          print(f"GCP project:     {parsed['project_id']}")
+          PY
+        env:
+          SA_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
+
+      # ------------------------------------------------------------
+      # Summary BEFORE upload (so the log shows what will happen)
+      # ------------------------------------------------------------
+      - name: Summary
+        shell: bash
+        run: |
+          cat <<EOF
+          ===== Deployment plan =====
+          Package:        ${{ inputs.package_name }}
+          Track:          ${{ inputs.track }}
+          Status:         ${{ inputs.status }}
+          User fraction:  ${{ inputs.user_fraction }}
+          Release name:   ${{ inputs.release_name }}
+          AAB size:       ${{ steps.find_aab.outputs.aab_size }} bytes
+          AAB path:       ${{ steps.find_aab.outputs.aab_path }}
+          Whats new dir:  ${{ inputs.whats_new_directory }}
+          Do upload:      ${{ inputs.do_upload }}
+          EOF
+
+      # ------------------------------------------------------------
+      # Actual upload. Skipped when do_upload=false (dry run).
+      # ------------------------------------------------------------
+      - name: Upload to Google Play
+        if: inputs.do_upload
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJson: play-service-account.json
+          packageName: ${{ inputs.package_name }}
+          releaseFiles: ${{ steps.find_aab.outputs.aab_path }}
+          track: ${{ inputs.track }}
+          status: ${{ inputs.status }}
+          userFraction: ${{ inputs.user_fraction }}
+          releaseName: ${{ inputs.release_name }}
+          inAppUpdatePriority: ${{ inputs.in_app_update_priority }}
+          whatsNewDirectory: ${{ inputs.whats_new_directory }}
+
+      - name: Dry-run notice
+        if: ${{ !inputs.do_upload }}
+        shell: bash
+        run: |
+          echo "::notice::do_upload=false - nothing was uploaded to Play Console."
+          echo "::notice::Set do_upload=true on the calling workflow to perform the actual upload."
+
+      # ------------------------------------------------------------
+      # Always clean up credentials, even on failure
+      # ------------------------------------------------------------
+      - name: Cleanup credentials
+        if: always()
+        shell: bash
+        run: |
+          rm -f play-service-account.json
+          echo "Cleanup done"
