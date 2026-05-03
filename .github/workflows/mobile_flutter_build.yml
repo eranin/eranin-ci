@@ -30,6 +30,16 @@ on:
         type: string
         default: ".env"
 
+      # NEW: Flutter build flavor (e.g. "prod", "dev", "stg"). Empty = no flavor.
+      flavor:
+        type: string
+        default: ""
+
+      # NEW: Dart entry point file (e.g. "lib/main_prod.dart"). Empty = default lib/main.dart.
+      target:
+        type: string
+        default: ""
+
       ios_codesign:
         type: boolean
         default: false
@@ -47,11 +57,9 @@ on:
     # Secrets
     # ------------------------------------------------------------
     secrets:
-      # App env
       ENV_PROD_BASE64:
         required: false
 
-      # Firebase config
       ANDROID_GOOGLE_SERVICES_JSON_BASE64:
         required: false
       IOS_GOOGLESERVICE_INFO_PLIST_BASE64:
@@ -59,13 +67,11 @@ on:
       IOS_GOOGLEOAUTH_PLIST_BASE64:
         required: false
 
-      # Android signing
       ANDROID_KEYSTORE_BASE64:
         required: false
       ANDROID_KEY_PROPERTIES_BASE64:
         required: false
 
-      # iOS signing (P12 + mobileprovision)
       IOS_P12_BASE64:
         required: false
       IOS_P12_PASSWORD:
@@ -78,9 +84,6 @@ on:
       IOS_EXPORT_OPTIONS_PLIST_BASE64:
         required: false
 
-    # ------------------------------------------------------------
-    # Outputs
-    # ------------------------------------------------------------
     outputs:
       build_version:
         value: ${{ jobs.meta.outputs.version }}
@@ -196,6 +199,9 @@ jobs:
           kp.parent.mkdir(parents=True, exist_ok=True)
           kp.write_bytes(base64.b64decode(os.environ["KP_B64"]))
 
+          # Write keystore to BOTH locations so it works regardless of
+          # whether key.properties uses storeFile=key.jks (rootProject = android/)
+          # or storeFile=app/key.jks
           jks1 = wd / "android/app/key.jks"
           jks1.parent.mkdir(parents=True, exist_ok=True)
           jks1.write_bytes(base64.b64decode(os.environ["JKS_B64"]))
@@ -221,24 +227,25 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
         shell: bash
         run: |
-          echo "===== Looking for flavor / naming overrides ====="
-          grep -nE "archivesBaseName|productFlavors|flavorDimensions|applicationIdSuffix|rootProject.buildDir|setArchivesBaseName" \
-            android/build.gradle android/build.gradle.kts \
+          echo "===== Detected flavors / signing config ====="
+          grep -nE "flavorDimensions|productFlavors|signingConfig|archivesBaseName|applicationIdSuffix" \
             android/app/build.gradle android/app/build.gradle.kts \
-            2>/dev/null || echo "(no overrides found - using defaults)"
+            android/build.gradle  android/build.gradle.kts \
+            2>/dev/null || echo "(no relevant config found)"
           echo ""
-          echo "===== gradle-wrapper.properties ====="
-          cat android/gradle/wrapper/gradle-wrapper.properties 2>/dev/null || echo "(missing)"
+          echo "===== Inputs ====="
+          echo "flavor:        '${{ inputs.flavor }}'"
+          echo "target:        '${{ inputs.target }}'"
+          echo "android_output: ${{ inputs.android_output }}"
+          echo "build_type:    ${{ inputs.build_type }}"
 
       - name: Install Dependencies
         working-directory: ${{ inputs.working_directory }}
         run: flutter pub get
 
       # ----------------------------------------------------------
-      # Build Android with auto-recovery for the well-known
-      # "Gradle build failed to produce an .aab file" issue
-      # (Gradle succeeds, but Flutter can't find the file because
-      #  the project uses flavors or a custom archivesBaseName.)
+      # Build Android with explicit flavor + target support.
+      # Auto-recovery is kept as a safety net only.
       # ----------------------------------------------------------
       - name: Build Android
         id: android_build
@@ -246,47 +253,62 @@ jobs:
         shell: bash
         run: |
           set +e
+
+          # Build the flutter command with optional --flavor and -t
+          ARGS="--${{ inputs.build_type }}"
+          if [ -n "${{ inputs.flavor }}" ]; then
+            ARGS="$ARGS --flavor=${{ inputs.flavor }}"
+          fi
+          if [ -n "${{ inputs.target }}" ]; then
+            ARGS="$ARGS -t ${{ inputs.target }}"
+          fi
+
           if [ "${{ inputs.android_output }}" = "appbundle" ]; then
-            flutter build appbundle --${{ inputs.build_type }} 2>&1 | tee build.log
-            FLUTTER_RC=${PIPESTATUS[0]}
+            CMD="flutter build appbundle $ARGS"
             EXT="aab"
           else
-            flutter build apk --${{ inputs.build_type }} 2>&1 | tee build.log
-            FLUTTER_RC=${PIPESTATUS[0]}
+            CMD="flutter build apk $ARGS"
             EXT="apk"
           fi
+
+          echo "Running: $CMD"
+          eval $CMD 2>&1 | tee build.log
+          FLUTTER_RC=${PIPESTATUS[0]}
           set -e
 
           if [ "$FLUTTER_RC" -eq 0 ]; then
             echo "Flutter build succeeded."
-            echo "recovered=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
           echo ""
           echo "Flutter build exited with code $FLUTTER_RC. Checking if Gradle actually produced the artifact..."
 
-          # Search the whole project tree for the produced artifact.
-          FOUND=$(find . -type f -name "*.${EXT}" -not -path "*/.dart_tool/*" 2>/dev/null | head -n 5)
+          # Restrict the search by flavor if one was specified, to avoid
+          # picking up the wrong flavor's output.
+          if [ -n "${{ inputs.flavor }}" ]; then
+            FLAVOR_PATTERN="*${{ inputs.flavor }}*"
+            FOUND=$(find . -type f -name "*.${EXT}" -path "*${FLAVOR_PATTERN}*" -not -path "*/.dart_tool/*" 2>/dev/null | head -n 5)
+          else
+            FOUND=$(find . -type f -name "*.${EXT}" -not -path "*/.dart_tool/*" 2>/dev/null | head -n 5)
+          fi
 
           if [ -z "$FOUND" ]; then
-            echo "No .${EXT} files found anywhere - this is a real Gradle failure."
+            echo "No matching .${EXT} files found - this is a real Gradle failure."
             echo "----- last 80 lines of build.log -----"
             tail -n 80 build.log || true
             exit "$FLUTTER_RC"
           fi
 
-          echo "Found artifact(s) despite Flutter's path-lookup failure:"
+          echo "Found artifact(s):"
           echo "$FOUND"
 
-          # Only auto-recover if the failure was the path-lookup case.
           if ! grep -q "Gradle build failed to produce an .${EXT} file" build.log; then
             echo "Failure does not look like the known path-lookup issue. Aborting."
             exit "$FLUTTER_RC"
           fi
 
-          # Pick the first match and copy it to the canonical location
-          # so downstream artifact upload + flutter tooling are happy.
+          # Copy to canonical location for downstream upload step
           FIRST=$(echo "$FOUND" | head -n 1)
           if [ "$EXT" = "aab" ]; then
             CANON_DIR="build/app/outputs/bundle/release"
@@ -301,31 +323,40 @@ jobs:
             cp -f "$FIRST" "$CANON_FILE"
             echo "Copied $FIRST -> $CANON_FILE"
           fi
-
-          echo "recovered=true" >> $GITHUB_OUTPUT
-          echo "artifact_path=$CANON_FILE" >> $GITHUB_OUTPUT
           echo "Auto-recovery succeeded."
-          
+
       - name: Verify AAB is signed with release key
         if: inputs.build_type == 'release' && inputs.android_output == 'appbundle'
         working-directory: ${{ inputs.working_directory }}
         shell: bash
         run: |
-          AAB=$(find . -name "*.aab" -path "*/outputs/bundle/*" | head -n 1)
+          # Find AABs that match the requested flavor (if any), else any release AAB
+          if [ -n "${{ inputs.flavor }}" ]; then
+            AAB=$(find build -type f -name "*.aab" -path "*${{ inputs.flavor }}*" 2>/dev/null | head -n 1)
+          fi
           if [ -z "$AAB" ]; then
-            echo "No AAB found."
+            AAB=$(find build -type f -name "*.aab" -path "*release*" 2>/dev/null | head -n 1)
+          fi
+          if [ -z "$AAB" ]; then
+            echo "No AAB found to verify."
             exit 1
           fi
+
           echo "Inspecting: $AAB"
-          OWNER=$(unzip -p "$AAB" "META-INF/*.RSA" 2>/dev/null \
-            | keytool -printcert 2>/dev/null \
-            | grep -E "^Owner:" || echo "")
-          echo "$OWNER"
-          if echo "$OWNER" | grep -qi "CN=Android Debug"; then
-            echo "ERROR: AAB is signed with DEBUG key. Check signingConfigs in android/app/build.gradle"
+          # Extract certificate info from the AAB's signature
+          CERT_INFO=$(unzip -p "$AAB" "META-INF/*.RSA" 2>/dev/null \
+            | keytool -printcert 2>&1 || true)
+          echo "$CERT_INFO"
+
+          if echo "$CERT_INFO" | grep -qi "CN=Android Debug"; then
+            echo ""
+            echo "ERROR: AAB is signed with the DEBUG key. Play Console will reject this."
+            echo "Check that android/app/build.gradle.kts has signingConfigs.release"
+            echo "and that ANDROID_KEY_PROPERTIES_BASE64 + ANDROID_KEYSTORE_BASE64 are set."
             exit 1
           fi
-          echo "AAB signed with non-debug key — looks good."
+          echo ""
+          echo "OK: AAB is signed with a non-debug key."
 
       - name: Locate Android output (always)
         if: always()
@@ -342,7 +373,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: android-${{ needs.meta.outputs.version }}
+          name: android-${{ needs.meta.outputs.version }}${{ inputs.flavor != '' && format('-{0}', inputs.flavor) || '' }}
           path: |
             ${{ inputs.working_directory }}/**/build/**/outputs/**/*.apk
             ${{ inputs.working_directory }}/**/build/**/outputs/**/*.aab
@@ -435,7 +466,6 @@ jobs:
         if: inputs.ios_codesign && inputs.build_type == 'release'
         shell: bash
         run: |
-          # Check if all required secrets are provided
           if [ -z "$P12_B64" ] || [ -z "$MP_B64" ] || [ -z "$IOS_KEYCHAIN_PASSWORD" ]; then
             echo "iOS signing secrets not fully provided, skipping signing setup"
             echo "signing_configured=false" >> $GITHUB_OUTPUT
@@ -447,48 +477,49 @@ jobs:
           KEYCHAIN_NAME="build.keychain"
           KEYCHAIN_PATH="$HOME/Library/Keychains/${KEYCHAIN_NAME}-db"
 
-          # Clean up any leftover keychain from a previous run
           security delete-keychain "$KEYCHAIN_NAME" 2>/dev/null || true
 
           security create-keychain -p "$IOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_NAME"
           security unlock-keychain -p "$IOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
 
-          # Add our keychain to the search list (don't replace login keychain entirely)
           security list-keychains -d user -s "$KEYCHAIN_NAME" login.keychain-db
           security default-keychain -s "$KEYCHAIN_NAME"
 
-          # Decode P12
+          # Decode P12 (handles single OR double base64 encoding)
           python3 - <<'PY'
-          import os, base64, pathlib
+          import os, base64, pathlib, sys
+
+          raw = "".join(os.environ["P12_B64"].split())
+          try:
+              data = base64.b64decode(raw, validate=False)
+          except Exception as e:
+              print(f"ERROR: IOS_P12_BASE64 not valid base64: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          if data[:3] == b"MII":
+              print("Detected double-base64 encoding in IOS_P12_BASE64 - decoding once more")
+              data = base64.b64decode(data, validate=False)
+
+          if data[:2] != b"\x30\x82":
+              print(f"WARNING: decoded P12 does not start with DER magic 30 82 (got {data[:2].hex()})", file=sys.stderr)
+
           p = pathlib.Path("cert.p12")
-          p.write_bytes(base64.b64decode(os.environ["P12_B64"]))
+          p.write_bytes(data)
           print(f"Wrote cert.p12 ({p.stat().st_size} bytes)")
           PY
 
-          # ---- Validate P12 before importing ----
           echo "===== P12 Diagnostics ====="
-          ls -la cert.p12
-          echo "File type:"
           file cert.p12
-          echo "First 4 bytes (should be 30 82 ... for DER):"
-          head -c 4 cert.p12 | xxd
           echo "OpenSSL parse check:"
           if ! openssl pkcs12 -in cert.p12 -info -nokeys -passin "pass:$IOS_P12_PASSWORD" -legacy >/dev/null 2>&1; then
-            # retry without -legacy for older openssl
             if ! openssl pkcs12 -in cert.p12 -info -nokeys -passin "pass:$IOS_P12_PASSWORD" >/dev/null 2>&1; then
               echo "ERROR: openssl could not parse cert.p12 with the provided password."
-              echo "Likely causes:"
-              echo "  1. IOS_P12_BASE64 is not actually a PKCS#12 file (e.g. exported as .cer instead of .p12)."
-              echo "  2. The base64 secret is corrupted / wrapped / double-encoded."
-              echo "  3. IOS_P12_PASSWORD does not match the password used at export time."
               exit 1
             fi
           fi
           echo "P12 looks valid."
-          echo "==========================="
 
-          # Import P12 with explicit format and grant access to codesign + security
           security import cert.p12 \
             -k "$KEYCHAIN_PATH" \
             -P "$IOS_P12_PASSWORD" \
@@ -498,32 +529,32 @@ jobs:
             -T /usr/bin/security \
             -T /usr/bin/productbuild
 
-          # Allow codesign to use the private key without UI prompt
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: \
             -s -k "$IOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # Show what got imported (no secrets leaked - just identity names)
           echo "===== Identities in keychain ====="
           security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
-          echo "=================================="
 
-          # Install provisioning profile
+          # Decode mobileprovision (also auto-detects double-base64)
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           python3 - <<'PY'
-          import os, base64, pathlib
+          import os, base64, pathlib, sys
+          raw = "".join(os.environ["MP_B64"].split())
+          data = base64.b64decode(raw, validate=False)
+          if data[:3] == b"MII":
+              print("Detected double-base64 encoding in IOS_MOBILEPROVISION_BASE64 - decoding once more")
+              data = base64.b64decode(data, validate=False)
           p = pathlib.Path("profile.mobileprovision")
-          p.write_bytes(base64.b64decode(os.environ["MP_B64"]))
+          p.write_bytes(data)
           print(f"Wrote profile.mobileprovision ({p.stat().st_size} bytes)")
           PY
 
-          # Copy under its UUID so Xcode can find it
           PROFILE_UUID=$(security cms -D -i profile.mobileprovision \
             | python3 -c "import sys, plistlib; print(plistlib.loads(sys.stdin.buffer.read())['UUID'])")
           cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision"
           echo "Installed provisioning profile: ${PROFILE_UUID}"
 
-          # Clean up the on-disk copies (already imported into keychain / profiles dir)
           rm -f cert.p12 profile.mobileprovision
 
           echo "signing_configured=true" >> $GITHUB_OUTPUT
@@ -537,7 +568,6 @@ jobs:
         if: inputs.ios_codesign && inputs.build_type == 'release'
         shell: bash
         run: |
-          # Skip if signing was not configured
           if [ "${{ steps.ios_signing.outputs.signing_configured }}" != "true" ]; then
             echo "Signing not configured, skipping ExportOptions.plist"
             exit 0
@@ -556,7 +586,6 @@ jobs:
           print(f"Wrote ExportOptions: {target}")
           PY
           else
-            # Generate minimal ExportOptions.plist
             python3 - <<'PY'
           import os, pathlib
           method = os.environ["METHOD"]
@@ -592,18 +621,38 @@ jobs:
       - name: Build iOS (Signed)
         if: inputs.ios_codesign && inputs.build_type == 'release' && steps.ios_signing.outputs.signing_configured == 'true'
         working-directory: ${{ inputs.working_directory }}
-        run: flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
+        shell: bash
+        run: |
+          ARGS="--release --export-options-plist=ios/ExportOptions.plist"
+          if [ -n "${{ inputs.flavor }}" ]; then
+            ARGS="$ARGS --flavor=${{ inputs.flavor }}"
+          fi
+          if [ -n "${{ inputs.target }}" ]; then
+            ARGS="$ARGS -t ${{ inputs.target }}"
+          fi
+          echo "Running: flutter build ipa $ARGS"
+          flutter build ipa $ARGS
 
       - name: Build iOS (No Codesign)
         if: "!inputs.ios_codesign || inputs.build_type != 'release' || steps.ios_signing.outputs.signing_configured != 'true'"
         working-directory: ${{ inputs.working_directory }}
-        run: flutter build ios --${{ inputs.build_type }} --no-codesign
+        shell: bash
+        run: |
+          ARGS="--${{ inputs.build_type }} --no-codesign"
+          if [ -n "${{ inputs.flavor }}" ]; then
+            ARGS="$ARGS --flavor=${{ inputs.flavor }}"
+          fi
+          if [ -n "${{ inputs.target }}" ]; then
+            ARGS="$ARGS -t ${{ inputs.target }}"
+          fi
+          echo "Running: flutter build ios $ARGS"
+          flutter build ios $ARGS
 
       - name: Upload iOS Artifact (IPA)
         if: inputs.ios_codesign && inputs.build_type == 'release' && steps.ios_signing.outputs.signing_configured == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: ios-${{ needs.meta.outputs.version }}
+          name: ios-${{ needs.meta.outputs.version }}${{ inputs.flavor != '' && format('-{0}', inputs.flavor) || '' }}
           path: |
             **/build/ios/ipa/*.ipa
           if-no-files-found: error
@@ -612,7 +661,7 @@ jobs:
         if: "!inputs.ios_codesign || inputs.build_type != 'release' || steps.ios_signing.outputs.signing_configured != 'true'"
         uses: actions/upload-artifact@v7
         with:
-          name: ios-${{ needs.meta.outputs.version }}
+          name: ios-${{ needs.meta.outputs.version }}${{ inputs.flavor != '' && format('-{0}', inputs.flavor) || '' }}
           path: |
             **/build/ios/iphoneos/*.app
           if-no-files-found: warn
