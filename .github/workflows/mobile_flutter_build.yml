@@ -319,7 +319,7 @@ jobs:
 
       - name: Upload Android Artifact
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: android-${{ needs.meta.outputs.version }}
           path: |
@@ -580,7 +580,7 @@ jobs:
 
       - name: Upload iOS Artifact (IPA)
         if: inputs.ios_codesign && inputs.build_type == 'release' && steps.ios_signing.outputs.signing_configured == 'true'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ios-${{ needs.meta.outputs.version }}
           path: |
@@ -589,7 +589,7 @@ jobs:
 
       - name: Upload iOS Artifact (No Codesign)
         if: "!inputs.ios_codesign || inputs.build_type != 'release' || steps.ios_signing.outputs.signing_configured != 'true'"
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ios-${{ needs.meta.outputs.version }}
           path: |
