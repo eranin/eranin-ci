@@ -213,27 +213,118 @@ jobs:
           KP_B64: ${{ secrets.ANDROID_KEY_PROPERTIES_BASE64 }}
           JKS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
 
+      - name: Flutter clean (defensive against stale build dirs)
+        working-directory: ${{ inputs.working_directory }}
+        run: flutter clean
+
+      - name: Inspect Gradle config (diagnostic)
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        run: |
+          echo "===== Looking for flavor / naming overrides ====="
+          grep -nE "archivesBaseName|productFlavors|flavorDimensions|applicationIdSuffix|rootProject.buildDir|setArchivesBaseName" \
+            android/build.gradle android/build.gradle.kts \
+            android/app/build.gradle android/app/build.gradle.kts \
+            2>/dev/null || echo "(no overrides found - using defaults)"
+          echo ""
+          echo "===== gradle-wrapper.properties ====="
+          cat android/gradle/wrapper/gradle-wrapper.properties 2>/dev/null || echo "(missing)"
+
       - name: Install Dependencies
         working-directory: ${{ inputs.working_directory }}
         run: flutter pub get
 
+      # ----------------------------------------------------------
+      # Build Android with auto-recovery for the well-known
+      # "Gradle build failed to produce an .aab file" issue
+      # (Gradle succeeds, but Flutter can't find the file because
+      #  the project uses flavors or a custom archivesBaseName.)
+      # ----------------------------------------------------------
       - name: Build Android
+        id: android_build
         working-directory: ${{ inputs.working_directory }}
         shell: bash
         run: |
+          set +e
           if [ "${{ inputs.android_output }}" = "appbundle" ]; then
-            flutter build appbundle --${{ inputs.build_type }}
+            flutter build appbundle --${{ inputs.build_type }} 2>&1 | tee build.log
+            FLUTTER_RC=${PIPESTATUS[0]}
+            EXT="aab"
           else
-            flutter build apk --${{ inputs.build_type }}
+            flutter build apk --${{ inputs.build_type }} 2>&1 | tee build.log
+            FLUTTER_RC=${PIPESTATUS[0]}
+            EXT="apk"
+          fi
+          set -e
+
+          if [ "$FLUTTER_RC" -eq 0 ]; then
+            echo "Flutter build succeeded."
+            echo "recovered=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
+          echo ""
+          echo "Flutter build exited with code $FLUTTER_RC. Checking if Gradle actually produced the artifact..."
+
+          # Search the whole project tree for the produced artifact.
+          FOUND=$(find . -type f -name "*.${EXT}" -not -path "*/.dart_tool/*" 2>/dev/null | head -n 5)
+
+          if [ -z "$FOUND" ]; then
+            echo "No .${EXT} files found anywhere - this is a real Gradle failure."
+            echo "----- last 80 lines of build.log -----"
+            tail -n 80 build.log || true
+            exit "$FLUTTER_RC"
+          fi
+
+          echo "Found artifact(s) despite Flutter's path-lookup failure:"
+          echo "$FOUND"
+
+          # Only auto-recover if the failure was the path-lookup case.
+          if ! grep -q "Gradle build failed to produce an .${EXT} file" build.log; then
+            echo "Failure does not look like the known path-lookup issue. Aborting."
+            exit "$FLUTTER_RC"
+          fi
+
+          # Pick the first match and copy it to the canonical location
+          # so downstream artifact upload + flutter tooling are happy.
+          FIRST=$(echo "$FOUND" | head -n 1)
+          if [ "$EXT" = "aab" ]; then
+            CANON_DIR="build/app/outputs/bundle/release"
+            CANON_FILE="$CANON_DIR/app-release.aab"
+          else
+            CANON_DIR="build/app/outputs/flutter-apk"
+            CANON_FILE="$CANON_DIR/app-release.apk"
+          fi
+
+          mkdir -p "$CANON_DIR"
+          if [ "$(realpath "$FIRST")" != "$(realpath "$CANON_FILE" 2>/dev/null || echo "")" ]; then
+            cp -f "$FIRST" "$CANON_FILE"
+            echo "Copied $FIRST -> $CANON_FILE"
+          fi
+
+          echo "recovered=true" >> $GITHUB_OUTPUT
+          echo "artifact_path=$CANON_FILE" >> $GITHUB_OUTPUT
+          echo "Auto-recovery succeeded."
+
+      - name: Locate Android output (always)
+        if: always()
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        run: |
+          echo "===== All AAB / APK files in workspace ====="
+          find . -type f \( -name "*.aab" -o -name "*.apk" \) -not -path "*/.dart_tool/*" 2>/dev/null || true
+          echo ""
+          echo "===== build/app/outputs (if present) ====="
+          find build/app/outputs -maxdepth 6 2>/dev/null || echo "(does not exist)"
+
       - name: Upload Android Artifact
+        if: always()
         uses: actions/upload-artifact@v5
         with:
           name: android-${{ needs.meta.outputs.version }}
           path: |
-            **/build/app/outputs/**/*.apk
-            **/build/app/outputs/**/*.aab
+            ${{ inputs.working_directory }}/**/build/**/outputs/**/*.apk
+            ${{ inputs.working_directory }}/**/build/**/outputs/**/*.aab
           if-no-files-found: error
 
   # =============================================================
