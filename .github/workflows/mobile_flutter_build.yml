@@ -305,6 +305,27 @@ jobs:
           echo "recovered=true" >> $GITHUB_OUTPUT
           echo "artifact_path=$CANON_FILE" >> $GITHUB_OUTPUT
           echo "Auto-recovery succeeded."
+          
+      - name: Verify AAB is signed with release key
+        if: inputs.build_type == 'release' && inputs.android_output == 'appbundle'
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        run: |
+          AAB=$(find . -name "*.aab" -path "*/outputs/bundle/*" | head -n 1)
+          if [ -z "$AAB" ]; then
+            echo "No AAB found."
+            exit 1
+          fi
+          echo "Inspecting: $AAB"
+          OWNER=$(unzip -p "$AAB" "META-INF/*.RSA" 2>/dev/null \
+            | keytool -printcert 2>/dev/null \
+            | grep -E "^Owner:" || echo "")
+          echo "$OWNER"
+          if echo "$OWNER" | grep -qi "CN=Android Debug"; then
+            echo "ERROR: AAB is signed with DEBUG key. Check signingConfigs in android/app/build.gradle"
+            exit 1
+          fi
+          echo "AAB signed with non-debug key — looks good."
 
       - name: Locate Android output (always)
         if: always()
