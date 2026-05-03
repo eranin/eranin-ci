@@ -83,12 +83,12 @@ jobs:
       # ------------------------------------------------------------
       # 3) Configure Docker daemon to allow insecure HTTP registry
       # ------------------------------------------------------------
-      - name: Configure Docker for HTTP Registry
-        run: |
-          HOST="${{ secrets.REGISTRY_URL }}"
-          echo "{\"insecure-registries\": [\"$HOST\"]}" | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
-          echo "Docker daemon configured for HTTP registry: $HOST"
+      # - name: Configure Docker for HTTP Registry
+      #   run: |
+      #     HOST="${{ secrets.REGISTRY_URL }}"
+      #     echo "{\"insecure-registries\": [\"$HOST\"]}" | sudo tee /etc/docker/daemon.json
+      #     sudo systemctl restart docker
+      #     echo "Docker daemon configured for HTTP registry: $HOST"
 
       # ------------------------------------------------------------
       # 4) Setup Buildx builder (multi-platform)
