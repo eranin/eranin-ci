@@ -30,15 +30,23 @@ on:
         type: string
         default: ".env"
 
-      # NEW: Flutter build flavor (e.g. "prod", "dev", "stg"). Empty = no flavor.
+      # Flutter build flavor (e.g. "prod", "dev", "stg"). Empty = no flavor.
       flavor:
         type: string
         default: ""
 
-      # NEW: Dart entry point file (e.g. "lib/main_prod.dart"). Empty = default lib/main.dart.
+      # Dart entry point file (e.g. "lib/main_prod.dart"). Empty = default lib/main.dart.
       target:
         type: string
         default: ""
+
+      # NEW: offset added to git commit count to compute versionCode / CFBundleVersion.
+      # Bump this if Play Console / TestFlight rejects with "version code already used"
+      # because the project has previously uploaded versions with codes higher than
+      # the current commit count. Default 0 = use raw commit count.
+      version_code_offset:
+        type: number
+        default: 0
 
       ios_codesign:
         type: boolean
@@ -87,6 +95,8 @@ on:
     outputs:
       build_version:
         value: ${{ jobs.meta.outputs.version }}
+      build_number:
+        value: ${{ jobs.meta.outputs.build_number }}
 
 permissions:
   contents: read
@@ -99,6 +109,7 @@ jobs:
     runs-on: self-hosted
     outputs:
       version: ${{ steps.version.outputs.version }}
+      build_number: ${{ steps.version.outputs.build_number }}
       count: ${{ steps.version.outputs.count }}
       date: ${{ steps.version.outputs.date }}
 
@@ -113,12 +124,19 @@ jobs:
         run: |
           DATE=$(date +%Y%m%d)
           COUNT=$(git rev-list --count HEAD)
-          VERSION="${DATE}.${COUNT}"
+          OFFSET=${{ inputs.version_code_offset }}
+          # build_number is what gets passed to Flutter as --build-number.
+          # On Android this becomes versionCode; on iOS it becomes CFBundleVersion.
+          # Both must be monotonically increasing for store uploads.
+          BUILD_NUMBER=$((COUNT + OFFSET))
+          VERSION="${DATE}.${BUILD_NUMBER}"
 
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "date=$DATE" >> $GITHUB_OUTPUT
+          echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
           echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "Build version: $VERSION"
+          echo "date=$DATE" >> $GITHUB_OUTPUT
+          echo "Build version : $VERSION"
+          echo "Build number  : $BUILD_NUMBER  (commit count $COUNT + offset $OFFSET)"
 
   # =============================================================
   # ANDROID BUILD
@@ -194,14 +212,10 @@ jobs:
           import os, base64, pathlib
           wd = pathlib.Path(os.environ["WD"])
 
-          # key.properties -> android/key.properties
           kp = wd / "android/key.properties"
           kp.parent.mkdir(parents=True, exist_ok=True)
           kp.write_bytes(base64.b64decode(os.environ["KP_B64"]))
 
-          # Write keystore to BOTH locations so it works regardless of
-          # whether key.properties uses storeFile=key.jks (rootProject = android/)
-          # or storeFile=app/key.jks
           jks1 = wd / "android/app/key.jks"
           jks1.parent.mkdir(parents=True, exist_ok=True)
           jks1.write_bytes(base64.b64decode(os.environ["JKS_B64"]))
@@ -234,18 +248,21 @@ jobs:
             2>/dev/null || echo "(no relevant config found)"
           echo ""
           echo "===== Inputs ====="
-          echo "flavor:        '${{ inputs.flavor }}'"
-          echo "target:        '${{ inputs.target }}'"
-          echo "android_output: ${{ inputs.android_output }}"
-          echo "build_type:    ${{ inputs.build_type }}"
+          echo "flavor:         '${{ inputs.flavor }}'"
+          echo "target:         '${{ inputs.target }}'"
+          echo "android_output:  ${{ inputs.android_output }}"
+          echo "build_type:      ${{ inputs.build_type }}"
+          echo "build_number:    ${{ needs.meta.outputs.build_number }}"
+          echo "build_version:   ${{ needs.meta.outputs.version }}"
 
       - name: Install Dependencies
         working-directory: ${{ inputs.working_directory }}
         run: flutter pub get
 
       # ----------------------------------------------------------
-      # Build Android with explicit flavor + target support.
-      # Auto-recovery is kept as a safety net only.
+      # Build Android with explicit flavor + target + build-number.
+      # --build-number overrides versionCode in pubspec.yaml so Play
+      # always gets a monotonically increasing code derived from git.
       # ----------------------------------------------------------
       - name: Build Android
         id: android_build
@@ -254,7 +271,6 @@ jobs:
         run: |
           set +e
 
-          # Build the flutter command with optional --flavor and -t
           ARGS="--${{ inputs.build_type }}"
           if [ -n "${{ inputs.flavor }}" ]; then
             ARGS="$ARGS --flavor=${{ inputs.flavor }}"
@@ -262,6 +278,9 @@ jobs:
           if [ -n "${{ inputs.target }}" ]; then
             ARGS="$ARGS -t ${{ inputs.target }}"
           fi
+          # Override versionCode and versionName with values derived from git
+          ARGS="$ARGS --build-number=${{ needs.meta.outputs.build_number }}"
+          ARGS="$ARGS --build-name=${{ needs.meta.outputs.version }}"
 
           if [ "${{ inputs.android_output }}" = "appbundle" ]; then
             CMD="flutter build appbundle $ARGS"
@@ -284,8 +303,6 @@ jobs:
           echo ""
           echo "Flutter build exited with code $FLUTTER_RC. Checking if Gradle actually produced the artifact..."
 
-          # Restrict the search by flavor if one was specified, to avoid
-          # picking up the wrong flavor's output.
           if [ -n "${{ inputs.flavor }}" ]; then
             FLAVOR_PATTERN="*${{ inputs.flavor }}*"
             FOUND=$(find . -type f -name "*.${EXT}" -path "*${FLAVOR_PATTERN}*" -not -path "*/.dart_tool/*" 2>/dev/null | head -n 5)
@@ -308,7 +325,6 @@ jobs:
             exit "$FLUTTER_RC"
           fi
 
-          # Copy to canonical location for downstream upload step
           FIRST=$(echo "$FOUND" | head -n 1)
           if [ "$EXT" = "aab" ]; then
             CANON_DIR="build/app/outputs/bundle/release"
@@ -330,7 +346,6 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
         shell: bash
         run: |
-          # Find AABs that match the requested flavor (if any), else any release AAB
           if [ -n "${{ inputs.flavor }}" ]; then
             AAB=$(find build -type f -name "*.aab" -path "*${{ inputs.flavor }}*" 2>/dev/null | head -n 1)
           fi
@@ -343,7 +358,6 @@ jobs:
           fi
 
           echo "Inspecting: $AAB"
-          # Extract certificate info from the AAB's signature
           CERT_INFO=$(unzip -p "$AAB" "META-INF/*.RSA" 2>/dev/null \
             | keytool -printcert 2>&1 || true)
           echo "$CERT_INFO"
@@ -486,7 +500,6 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_NAME" login.keychain-db
           security default-keychain -s "$KEYCHAIN_NAME"
 
-          # Decode P12 (handles single OR double base64 encoding)
           python3 - <<'PY'
           import os, base64, pathlib, sys
 
@@ -536,7 +549,6 @@ jobs:
           echo "===== Identities in keychain ====="
           security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
 
-          # Decode mobileprovision (also auto-detects double-base64)
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           python3 - <<'PY'
           import os, base64, pathlib, sys
@@ -630,6 +642,9 @@ jobs:
           if [ -n "${{ inputs.target }}" ]; then
             ARGS="$ARGS -t ${{ inputs.target }}"
           fi
+          # Override CFBundleVersion / CFBundleShortVersionString from git
+          ARGS="$ARGS --build-number=${{ needs.meta.outputs.build_number }}"
+          ARGS="$ARGS --build-name=${{ needs.meta.outputs.version }}"
           echo "Running: flutter build ipa $ARGS"
           flutter build ipa $ARGS
 
@@ -645,6 +660,8 @@ jobs:
           if [ -n "${{ inputs.target }}" ]; then
             ARGS="$ARGS -t ${{ inputs.target }}"
           fi
+          ARGS="$ARGS --build-number=${{ needs.meta.outputs.build_number }}"
+          ARGS="$ARGS --build-name=${{ needs.meta.outputs.version }}"
           echo "Running: flutter build ios $ARGS"
           flutter build ios $ARGS
 
