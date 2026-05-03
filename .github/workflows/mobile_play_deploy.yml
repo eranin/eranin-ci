@@ -101,7 +101,7 @@ permissions:
 jobs:
   deploy:
     name: Upload to Google Play (${{ inputs.track }})
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       # ------------------------------------------------------------
