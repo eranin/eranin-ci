@@ -332,22 +332,69 @@ jobs:
 
           set -euo pipefail
 
-          KEYCHAIN=build.keychain-db
+          KEYCHAIN_NAME="build.keychain"
+          KEYCHAIN_PATH="$HOME/Library/Keychains/${KEYCHAIN_NAME}-db"
 
-          security create-keychain -p "$IOS_KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -t 3600 -u "$KEYCHAIN"
-          security unlock-keychain -p "$IOS_KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security default-keychain -s "$KEYCHAIN"
+          # Clean up any leftover keychain from a previous run
+          security delete-keychain "$KEYCHAIN_NAME" 2>/dev/null || true
 
-          # Import p12
+          security create-keychain -p "$IOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_NAME"
+          security unlock-keychain -p "$IOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+
+          # Add our keychain to the search list (don't replace login keychain entirely)
+          security list-keychains -d user -s "$KEYCHAIN_NAME" login.keychain-db
+          security default-keychain -s "$KEYCHAIN_NAME"
+
+          # Decode P12
           python3 - <<'PY'
           import os, base64, pathlib
           p = pathlib.Path("cert.p12")
           p.write_bytes(base64.b64decode(os.environ["P12_B64"]))
-          print("Wrote cert.p12")
+          print(f"Wrote cert.p12 ({p.stat().st_size} bytes)")
           PY
 
-          security import cert.p12 -k "$KEYCHAIN" -P "$IOS_P12_PASSWORD" -T /usr/bin/codesign
+          # ---- Validate P12 before importing ----
+          echo "===== P12 Diagnostics ====="
+          ls -la cert.p12
+          echo "File type:"
+          file cert.p12
+          echo "First 4 bytes (should be 30 82 ... for DER):"
+          head -c 4 cert.p12 | xxd
+          echo "OpenSSL parse check:"
+          if ! openssl pkcs12 -in cert.p12 -info -nokeys -passin "pass:$IOS_P12_PASSWORD" -legacy >/dev/null 2>&1; then
+            # retry without -legacy for older openssl
+            if ! openssl pkcs12 -in cert.p12 -info -nokeys -passin "pass:$IOS_P12_PASSWORD" >/dev/null 2>&1; then
+              echo "ERROR: openssl could not parse cert.p12 with the provided password."
+              echo "Likely causes:"
+              echo "  1. IOS_P12_BASE64 is not actually a PKCS#12 file (e.g. exported as .cer instead of .p12)."
+              echo "  2. The base64 secret is corrupted / wrapped / double-encoded."
+              echo "  3. IOS_P12_PASSWORD does not match the password used at export time."
+              exit 1
+            fi
+          fi
+          echo "P12 looks valid."
+          echo "==========================="
+
+          # Import P12 with explicit format and grant access to codesign + security
+          security import cert.p12 \
+            -k "$KEYCHAIN_PATH" \
+            -P "$IOS_P12_PASSWORD" \
+            -f pkcs12 \
+            -A \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/productbuild
+
+          # Allow codesign to use the private key without UI prompt
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$IOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Show what got imported (no secrets leaked - just identity names)
+          echo "===== Identities in keychain ====="
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+          echo "=================================="
 
           # Install provisioning profile
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
@@ -355,9 +402,17 @@ jobs:
           import os, base64, pathlib
           p = pathlib.Path("profile.mobileprovision")
           p.write_bytes(base64.b64decode(os.environ["MP_B64"]))
-          print("Wrote profile.mobileprovision")
+          print(f"Wrote profile.mobileprovision ({p.stat().st_size} bytes)")
           PY
-          cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/"
+
+          # Copy under its UUID so Xcode can find it
+          PROFILE_UUID=$(security cms -D -i profile.mobileprovision \
+            | python3 -c "import sys, plistlib; print(plistlib.loads(sys.stdin.buffer.read())['UUID'])")
+          cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision"
+          echo "Installed provisioning profile: ${PROFILE_UUID}"
+
+          # Clean up the on-disk copies (already imported into keychain / profiles dir)
+          rm -f cert.p12 profile.mobileprovision
 
           echo "signing_configured=true" >> $GITHUB_OUTPUT
         env:
@@ -449,3 +504,11 @@ jobs:
           path: |
             **/build/ios/iphoneos/*.app
           if-no-files-found: warn
+
+      - name: Cleanup Keychain
+        if: always() && inputs.ios_codesign && inputs.build_type == 'release'
+        shell: bash
+        run: |
+          security delete-keychain build.keychain 2>/dev/null || true
+          rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/"*.mobileprovision 2>/dev/null || true
+          echo "Cleanup done"
