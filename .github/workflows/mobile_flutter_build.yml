@@ -398,7 +398,7 @@ jobs:
   # =============================================================
   ios:
     if: inputs.platform == 'ios' || inputs.platform == 'both'
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, X64]
     needs: meta
 
     steps:
