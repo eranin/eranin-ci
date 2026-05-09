@@ -106,7 +106,7 @@ jobs:
   # META: Versioning
   # =============================================================
   meta:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     outputs:
       version: ${{ steps.version.outputs.version }}
       build_number: ${{ steps.version.outputs.build_number }}
@@ -143,7 +143,7 @@ jobs:
   # =============================================================
   android:
     if: inputs.platform == 'android' || inputs.platform == 'both'
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
     needs: meta
 
     steps:
