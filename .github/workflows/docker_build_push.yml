@@ -52,7 +52,7 @@ jobs:
   # MAIN JOB: Build & Push Docker Image
   # =====================================================================
   build-and-push:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64]
 
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
