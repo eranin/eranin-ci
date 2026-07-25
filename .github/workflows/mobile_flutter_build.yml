@@ -10,6 +10,20 @@ on:
         type: string
         default: "3.19.6"
 
+      # Restore the Flutter SDK from the GitHub Actions cache.
+      #
+      # Off by default because these jobs run on SELF-HOSTED runners, where
+      # the tool cache (_work/_tool/flutter/<channel>-<version>-<arch>)
+      # already survives between runs — the same reason setup-java resolves
+      # in under a second. With this on, actions/cache reports a hit and then
+      # pulls a ~1.7GB tarball over the network at ~5MB/s to overwrite an SDK
+      # that is already on local disk, costing ~5 minutes per build.
+      #
+      # Turn it on only for ephemeral (GitHub-hosted) runners.
+      flutter_cache:
+        type: boolean
+        default: false
+
       platform:
         type: string
         default: "android" # android | ios | both
@@ -163,7 +177,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ inputs.flutter_version }}
-          cache: true
+          cache: ${{ inputs.flutter_cache }}
 
       - name: Inject .env (optional)
         shell: bash
@@ -406,9 +420,16 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: android-${{ needs.meta.outputs.version }}${{ inputs.flavor != '' && format('-{0}', inputs.flavor) || '' }}
+          # The trailing exclusion matters: Gradle writes the APK to
+          # android/app/build/outputs/apk/... AND Flutter copies it to
+          # build/app/outputs/flutter-apk/. Both match the globs above, so
+          # without it the artifact carries the same ~130MB file twice - paid
+          # for once on upload and again on every download. The Flutter copy
+          # is canonical and is also where the auto-recovery step writes.
           path: |
             ${{ inputs.working_directory }}/**/build/**/outputs/**/*.apk
             ${{ inputs.working_directory }}/**/build/**/outputs/**/*.aab
+            !${{ inputs.working_directory }}/**/android/**/build/**/outputs/**/*.apk
           if-no-files-found: error
 
   # =============================================================
@@ -426,7 +447,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ inputs.flutter_version }}
-          cache: true
+          cache: ${{ inputs.flutter_cache }}
 
       - name: Inject .env (optional)
         shell: bash
