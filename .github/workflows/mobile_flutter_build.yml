@@ -18,9 +18,13 @@ on:
         type: string
         default: "release" # debug | release
 
+      # apk       - sideloadable .apk only
+      # appbundle - .aab only (what Play Console accepts)
+      # both      - .aab for Play + .apk testers can install directly from the
+      #             run's artifact without going through the store
       android_output:
         type: string
-        default: "apk" # apk | appbundle
+        default: "apk" # apk | appbundle | both
 
       working_directory:
         type: string
@@ -269,8 +273,6 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
         shell: bash
         run: |
-          set +e
-
           ARGS="--${{ inputs.build_type }}"
           if [ -n "${{ inputs.flavor }}" ]; then
             ARGS="$ARGS --flavor=${{ inputs.flavor }}"
@@ -282,67 +284,83 @@ jobs:
           ARGS="$ARGS --build-number=${{ needs.meta.outputs.build_number }}"
           ARGS="$ARGS --build-name=${{ needs.meta.outputs.version }}"
 
-          if [ "${{ inputs.android_output }}" = "appbundle" ]; then
-            CMD="flutter build appbundle $ARGS"
-            EXT="aab"
-          else
-            CMD="flutter build apk $ARGS"
-            EXT="apk"
-          fi
+          case "${{ inputs.android_output }}" in
+            appbundle) KINDS="appbundle" ;;
+            apk)       KINDS="apk" ;;
+            both)      KINDS="appbundle apk" ;;
+            *) echo "ERROR: invalid android_output '${{ inputs.android_output }}' (apk | appbundle | both)" >&2; exit 1 ;;
+          esac
 
-          echo "Running: $CMD"
-          eval $CMD 2>&1 | tee build.log
-          FLUTTER_RC=${PIPESTATUS[0]}
-          set -e
+          # Builds one output kind. Returns non-zero only on a real Gradle
+          # failure - a Flutter path-lookup miss with the file on disk is
+          # recovered by copying it to the canonical location.
+          build_one() {
+            KIND="$1"
+            if [ "$KIND" = "appbundle" ]; then EXT="aab"; else EXT="apk"; fi
+            LOG="build-${EXT}.log"
 
-          if [ "$FLUTTER_RC" -eq 0 ]; then
-            echo "Flutter build succeeded."
-            exit 0
-          fi
+            echo ""
+            echo "===== Building $KIND ====="
+            echo "Running: flutter build $KIND $ARGS"
+            set +e
+            eval "flutter build $KIND $ARGS" 2>&1 | tee "$LOG"
+            FLUTTER_RC=${PIPESTATUS[0]}
+            set -e
 
-          echo ""
-          echo "Flutter build exited with code $FLUTTER_RC. Checking if Gradle actually produced the artifact..."
+            if [ "$FLUTTER_RC" -eq 0 ]; then
+              echo "Flutter build ($KIND) succeeded."
+              return 0
+            fi
 
-          if [ -n "${{ inputs.flavor }}" ]; then
-            FLAVOR_PATTERN="*${{ inputs.flavor }}*"
-            FOUND=$(find . -type f -name "*.${EXT}" -path "*${FLAVOR_PATTERN}*" -not -path "*/.dart_tool/*" 2>/dev/null | head -n 5)
-          else
-            FOUND=$(find . -type f -name "*.${EXT}" -not -path "*/.dart_tool/*" 2>/dev/null | head -n 5)
-          fi
+            echo ""
+            echo "Flutter build ($KIND) exited with code $FLUTTER_RC. Checking if Gradle actually produced the artifact..."
 
-          if [ -z "$FOUND" ]; then
-            echo "No matching .${EXT} files found - this is a real Gradle failure."
-            echo "----- last 80 lines of build.log -----"
-            tail -n 80 build.log || true
-            exit "$FLUTTER_RC"
-          fi
+            if [ -n "${{ inputs.flavor }}" ]; then
+              FLAVOR_PATTERN="*${{ inputs.flavor }}*"
+              FOUND=$(find . -type f -name "*.${EXT}" -path "*${FLAVOR_PATTERN}*" -not -path "*/.dart_tool/*" 2>/dev/null | head -n 5)
+            else
+              FOUND=$(find . -type f -name "*.${EXT}" -not -path "*/.dart_tool/*" 2>/dev/null | head -n 5)
+            fi
 
-          echo "Found artifact(s):"
-          echo "$FOUND"
+            if [ -z "$FOUND" ]; then
+              echo "No matching .${EXT} files found - this is a real Gradle failure."
+              echo "----- last 80 lines of $LOG -----"
+              tail -n 80 "$LOG" || true
+              return "$FLUTTER_RC"
+            fi
 
-          if ! grep -q "Gradle build failed to produce an .${EXT} file" build.log; then
-            echo "Failure does not look like the known path-lookup issue. Aborting."
-            exit "$FLUTTER_RC"
-          fi
+            echo "Found artifact(s):"
+            echo "$FOUND"
 
-          FIRST=$(echo "$FOUND" | head -n 1)
-          if [ "$EXT" = "aab" ]; then
-            CANON_DIR="build/app/outputs/bundle/release"
-            CANON_FILE="$CANON_DIR/app-release.aab"
-          else
-            CANON_DIR="build/app/outputs/flutter-apk"
-            CANON_FILE="$CANON_DIR/app-release.apk"
-          fi
+            if ! grep -q "Gradle build failed to produce an .${EXT} file" "$LOG"; then
+              echo "Failure does not look like the known path-lookup issue. Aborting."
+              return "$FLUTTER_RC"
+            fi
 
-          mkdir -p "$CANON_DIR"
-          if [ "$(realpath "$FIRST")" != "$(realpath "$CANON_FILE" 2>/dev/null || echo "")" ]; then
-            cp -f "$FIRST" "$CANON_FILE"
-            echo "Copied $FIRST -> $CANON_FILE"
-          fi
-          echo "Auto-recovery succeeded."
+            FIRST=$(echo "$FOUND" | head -n 1)
+            if [ "$EXT" = "aab" ]; then
+              CANON_DIR="build/app/outputs/bundle/release"
+              CANON_FILE="$CANON_DIR/app-release.aab"
+            else
+              CANON_DIR="build/app/outputs/flutter-apk"
+              CANON_FILE="$CANON_DIR/app-release.apk"
+            fi
+
+            mkdir -p "$CANON_DIR"
+            if [ "$(realpath "$FIRST")" != "$(realpath "$CANON_FILE" 2>/dev/null || echo "")" ]; then
+              cp -f "$FIRST" "$CANON_FILE"
+              echo "Copied $FIRST -> $CANON_FILE"
+            fi
+            echo "Auto-recovery succeeded."
+            return 0
+          }
+
+          for KIND in $KINDS; do
+            build_one "$KIND" || exit $?
+          done
 
       - name: Verify AAB is signed with release key
-        if: inputs.build_type == 'release' && inputs.android_output == 'appbundle'
+        if: inputs.build_type == 'release' && (inputs.android_output == 'appbundle' || inputs.android_output == 'both')
         working-directory: ${{ inputs.working_directory }}
         shell: bash
         run: |
