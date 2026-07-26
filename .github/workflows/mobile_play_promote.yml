@@ -1,0 +1,245 @@
+name: Mobile Play Promote
+
+# Promote an EXISTING Play release from one track to another — typically
+# internal → production — without rebuilding anything.
+#
+# This is deliberately not a second upload. mobile_play_deploy.yml builds an
+# AAB and pushes it, which mints a new versionCode; promoting instead moves the
+# versionCode that testers already signed off from one track to the next, so
+# what reaches production is the exact artifact that was tested.
+#
+# Usage (from a calling workflow, workflow_dispatch only):
+#
+#   jobs:
+#     promote:
+#       uses: eranin/eranin-ci/.github/workflows/mobile_play_promote.yml@main
+#       with:
+#         package_name: "com.eranin.etask"
+#         from_track: internal
+#         to_track: production
+#         user_fraction: "0.1"
+#       secrets:
+#         PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
+
+on:
+  workflow_call:
+    inputs:
+      package_name:
+        type: string
+        required: true
+
+      # Track to take the release FROM.
+      from_track:
+        type: string
+        default: "internal"
+
+      # Track to promote INTO.
+      to_track:
+        type: string
+        default: "production"
+
+      # completed  - live to the whole target track
+      # inProgress - staged rollout, requires user_fraction
+      # draft      - stage it in Play Console for a human to release
+      status:
+        type: string
+        default: "completed"
+
+      # Staged-rollout share, e.g. "0.1" for 10%. Only used with inProgress.
+      user_fraction:
+        type: string
+        default: ""
+
+      # Optional explicit versionCode. Empty = promote the highest versionCode
+      # currently on from_track, which is the normal case.
+      version_code:
+        type: string
+        default: ""
+
+      # Safety switch. false = resolve and print the plan, change nothing.
+      do_promote:
+        type: boolean
+        default: false
+
+    secrets:
+      PLAY_SERVICE_ACCOUNT_JSON_BASE64:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: Promote ${{ inputs.from_track }} → ${{ inputs.to_track }}
+    runs-on: [self-hosted, Linux, X64]
+
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for t in "${{ inputs.from_track }}" "${{ inputs.to_track }}"; do
+            case "$t" in
+              internal|alpha|beta|production) ;;
+              *) echo "ERROR: invalid track '$t' (internal|alpha|beta|production)" >&2; exit 1 ;;
+            esac
+          done
+
+          if [ "${{ inputs.from_track }}" = "${{ inputs.to_track }}" ]; then
+            echo "ERROR: from_track and to_track are both '${{ inputs.from_track }}'" >&2
+            exit 1
+          fi
+
+          case "${{ inputs.status }}" in
+            completed|inProgress|draft) ;;
+            *) echo "ERROR: invalid status '${{ inputs.status }}' (completed|inProgress|draft)" >&2; exit 1 ;;
+          esac
+
+          if [ "${{ inputs.status }}" = "inProgress" ] && [ -z "${{ inputs.user_fraction }}" ]; then
+            echo "ERROR: status=inProgress requires user_fraction (e.g. 0.1)" >&2
+            exit 1
+          fi
+
+          if [ "${{ inputs.to_track }}" = "production" ] && [ "${{ inputs.status }}" = "completed" ]; then
+            echo "::warning::Promoting to PRODUCTION at 100%. Consider status=inProgress with user_fraction=0.1 and ramping."
+          fi
+
+      - name: Set up Python deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --user --upgrade google-auth requests
+          echo "google-auth + requests ready"
+
+      - name: Decode service account JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, base64, pathlib, sys, json
+
+          raw = "".join(os.environ["SA_B64"].split())
+          data = base64.b64decode(raw, validate=False)
+          # Tolerate a double-encoded secret, same as mobile_play_deploy.
+          if not data.lstrip().startswith(b"{"):
+              data = base64.b64decode(data, validate=False)
+
+          parsed = json.loads(data)
+          missing = {"type", "client_email", "private_key", "project_id"} - set(parsed)
+          if missing:
+              print(f"ERROR: service account JSON missing fields: {missing}", file=sys.stderr)
+              sys.exit(1)
+
+          pathlib.Path("play-service-account.json").write_bytes(data)
+          print(f"Service account: {parsed['client_email']}")
+          PY
+        env:
+          SA_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
+
+      - name: Promote
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          from google.oauth2 import service_account
+          from google.auth.transport.requests import AuthorizedSession
+
+          PKG        = os.environ["PACKAGE_NAME"]
+          FROM       = os.environ["FROM_TRACK"]
+          TO         = os.environ["TO_TRACK"]
+          STATUS     = os.environ["REL_STATUS"]
+          FRACTION   = os.environ.get("USER_FRACTION", "").strip()
+          WANTED_VC  = os.environ.get("VERSION_CODE", "").strip()
+          DO_PROMOTE = os.environ.get("DO_PROMOTE", "false").lower() == "true"
+
+          BASE = "https://androidpublisher.googleapis.com/androidpublisher/v3"
+          creds = service_account.Credentials.from_service_account_file(
+              "play-service-account.json",
+              scopes=["https://www.googleapis.com/auth/androidpublisher"],
+          )
+          http = AuthorizedSession(creds)
+
+          def check(r, what):
+              if not r.ok:
+                  print(f"ERROR: {what} -> HTTP {r.status_code}\n{r.text}", file=sys.stderr)
+                  sys.exit(1)
+              return r.json() if r.content else {}
+
+          edit = check(http.post(f"{BASE}/applications/{PKG}/edits"), "create edit")
+          edit_id = edit["id"]
+          print(f"Edit: {edit_id}")
+
+          src = check(
+              http.get(f"{BASE}/applications/{PKG}/edits/{edit_id}/tracks/{FROM}"),
+              f"read track {FROM}",
+          )
+          releases = src.get("releases") or []
+          if not releases:
+              print(f"ERROR: track '{FROM}' has no releases to promote.", file=sys.stderr)
+              sys.exit(1)
+
+          # Pick the release carrying the highest versionCode. Play lists a
+          # track's releases without a guaranteed order, and a track can hold
+          # several (e.g. a halted one alongside the live one).
+          def top_vc(rel):
+              return max((int(v) for v in rel.get("versionCodes") or []), default=-1)
+
+          if WANTED_VC:
+              chosen = next((r for r in releases if WANTED_VC in [str(v) for v in (r.get("versionCodes") or [])]), None)
+              if chosen is None:
+                  print(f"ERROR: versionCode {WANTED_VC} is not on track '{FROM}'.", file=sys.stderr)
+                  print(f"Available: {[r.get('versionCodes') for r in releases]}", file=sys.stderr)
+                  sys.exit(1)
+          else:
+              chosen = max(releases, key=top_vc)
+
+          version_codes = [str(v) for v in chosen.get("versionCodes") or []]
+          print(f"Promoting versionCodes {version_codes} "
+                f"(name={chosen.get('name')!r}, source status={chosen.get('status')!r})")
+
+          new_release = {"versionCodes": version_codes, "status": STATUS}
+          if chosen.get("name"):
+              new_release["name"] = chosen["name"]
+          # Carry the tester-facing notes forward so production is not blank.
+          if chosen.get("releaseNotes"):
+              new_release["releaseNotes"] = chosen["releaseNotes"]
+          if STATUS == "inProgress":
+              new_release["userFraction"] = float(FRACTION)
+
+          print("\n===== Plan =====")
+          print(f"Package : {PKG}")
+          print(f"From    : {FROM}")
+          print(f"To      : {TO}")
+          print(f"Release : {json.dumps(new_release, ensure_ascii=False)}")
+          print(f"Commit  : {DO_PROMOTE}")
+
+          if not DO_PROMOTE:
+              http.delete(f"{BASE}/applications/{PKG}/edits/{edit_id}")
+              print("\n::notice::do_promote=false - edit discarded, Play unchanged.")
+              sys.exit(0)
+
+          check(
+              http.put(
+                  f"{BASE}/applications/{PKG}/edits/{edit_id}/tracks/{TO}",
+                  json={"track": TO, "releases": [new_release]},
+              ),
+              f"write track {TO}",
+          )
+          check(http.post(f"{BASE}/applications/{PKG}/edits/{edit_id}:commit"), "commit edit")
+          print(f"\n✅ Promoted {version_codes} to '{TO}' as {STATUS}.")
+          PY
+        env:
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          FROM_TRACK: ${{ inputs.from_track }}
+          TO_TRACK: ${{ inputs.to_track }}
+          REL_STATUS: ${{ inputs.status }}
+          USER_FRACTION: ${{ inputs.user_fraction }}
+          VERSION_CODE: ${{ inputs.version_code }}
+          DO_PROMOTE: ${{ inputs.do_promote }}
+
+      - name: Cleanup credentials
+        if: always()
+        shell: bash
+        run: rm -f play-service-account.json
