@@ -46,6 +46,12 @@ on:
 
       # Track to deploy to. Start with "internal" for safety.
       # Valid values: internal | alpha | beta | production
+      #
+      # Stays SINGULAR on purpose. The upload action's own `track` input is
+      # deprecated in favour of `tracks` (see the upload step), but this is a
+      # different thing: it is this workflow's public interface, every caller
+      # passes `track:`, and one deploy shipping to several tracks at once is
+      # not something we want to make easy.
       track:
         type: string
         default: "internal"
@@ -333,7 +339,16 @@ jobs:
           serviceAccountJson: play-service-account.json
           packageName: ${{ inputs.package_name }}
           releaseFiles: ${{ steps.find_aab.outputs.aab_path }}
-          track: ${{ inputs.track }}
+          # `tracks` (plural), not `track`: the action deprecated the singular
+          # form and warns on every run. It is a comma-separated list that it
+          # splits itself, so a single value passes through unchanged.
+          #
+          # Worth knowing: the action falls back to PRODUCTION when neither
+          # input is set. That is not a new risk introduced here — the
+          # deprecated `track` behaved identically — and the Validate step
+          # above already rejects anything that is not internal|alpha|beta|
+          # production, so an empty value fails the job long before this.
+          tracks: ${{ inputs.track }}
           status: ${{ inputs.status }}
           userFraction: ${{ inputs.user_fraction }}
           releaseName: ${{ inputs.release_name }}
