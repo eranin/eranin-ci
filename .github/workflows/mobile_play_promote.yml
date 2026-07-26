@@ -61,6 +61,17 @@ on:
         type: boolean
         default: false
 
+      # GitHub Environment this job deploys to. This is what makes the job WAIT
+      # for a human: configure the environment with required reviewers and the
+      # run pauses here until one of them approves.
+      #
+      # NOTE: with no protection rules configured, an environment does NOT gate
+      # anything - the job simply runs. Callers that chain this after an
+      # automatic deploy must therefore also guard it (see deploy-prod.yml).
+      environment:
+        type: string
+        default: "play-production"
+
     secrets:
       PLAY_SERVICE_ACCOUNT_JSON_BASE64:
         required: true
@@ -72,6 +83,7 @@ jobs:
   promote:
     name: Promote ${{ inputs.from_track }} → ${{ inputs.to_track }}
     runs-on: [self-hosted, Linux, X64]
+    environment: ${{ inputs.environment }}
 
     steps:
       - name: Validate inputs
