@@ -62,7 +62,11 @@ jobs:
       # ------------------------------------------------------------
       # 1) Checkout source code
       # ------------------------------------------------------------
-      - uses: actions/checkout@v4
+      # v5 = the Node 24 runtime (v4 targets Node 20, which the runner now forces
+      # onto 24 with a deprecation warning). Needs runner >= 2.327.1; our
+      # self-hosted Linux X64 pool is on 2.334.0 and already runs checkout@v5 in
+      # mobile_flutter_build.yml. Inputs are unchanged from v4.
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0          # Required to count commits
 
