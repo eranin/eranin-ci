@@ -28,23 +28,31 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
+      # package-manager-cache: false keeps v4's behaviour. v4 never cached unless
+      # you passed `cache:`; v5 switches caching ON by itself when the CALLER's
+      # package.json declares a `packageManager` field — and caching without a
+      # lockfile hard-errors ("Dependencies lock file is not found"). This is a
+      # reusable workflow run against arbitrary repos, some of which do not commit
+      # a lockfile, so an opt-in stays opt-in. (code_quality.yml is deliberately
+      # different: it asks for `cache: npm` and runs `npm ci`.)
       - name: Setup Node
         if: ${{ inputs.runtime == 'node' }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "20"
+          package-manager-cache: false
 
       - name: Setup Python
         if: ${{ inputs.runtime == 'python' }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Setup Go
         if: ${{ inputs.runtime == 'go' }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.22"
 
@@ -135,7 +143,7 @@ jobs:
 
       - name: Upload License Report
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: license-report-${{ inputs.runtime }}
           path: |

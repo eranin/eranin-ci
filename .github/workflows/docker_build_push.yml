@@ -148,8 +148,19 @@ jobs:
       # ------------------------------------------------------------
       # 7) Build and push image
       # ------------------------------------------------------------
+      # v7, not v6: v6 is STILL runs.using node20, so it would keep the Node 20
+      # deprecation warning on every image build. v7 is the first node24 major
+      # (runner >= 2.327.1; this pool is on 2.334.0). None of the inputs used
+      # below changed across v5 -> v7.
+      #
+      # DOCKER_BUILD_SUMMARY: false keeps v5's behaviour. v6 added an automatic
+      # build summary that also exports a build record artifact on every build;
+      # that is a visible change to every consumer's run, so it stays off here.
+      # Flip it to true (or drop the env) if the summaries are wanted.
       - name: Build and Push Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_SUMMARY: false
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
