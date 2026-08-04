@@ -1,0 +1,359 @@
+name: Desktop Electron Build
+
+# Build an Electron app into installers and publish them as a GitHub Release.
+#
+# An installer can only be produced on the OS it targets — NSIS needs Windows,
+# DMG needs macOS — so the build fans out across runners and a single release
+# job collects what they produced. That job is the only writer: letting each
+# platform publish its own files races three uploads against one draft release
+# and the loser's installer silently goes missing.
+#
+# The version is derived from git rather than from package.json, so merging to
+# the release branch is all it takes to cut a build: <major>.<minor> comes from
+# package.json and the patch is the commit count — monotonic, valid semver
+# (electron-updater compares it as one) and traceable back to a commit.
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: Node version used for the build.
+        type: string
+        default: "20"
+
+      working_directory:
+        description: Directory holding package.json.
+        type: string
+        default: "."
+
+      platforms:
+        description: "Comma-separated: win, linux, mac. Each one costs a runner."
+        type: string
+        default: "win,linux"
+
+      # runs-on takes either a label or a list of them, and a workflow input can
+      # only be a string — so these are JSON. '"windows-latest"' for a hosted
+      # runner, '["self-hosted","Windows","X64"]' for one of ours.
+      windows_runner:
+        type: string
+        default: '"windows-latest"'
+      linux_runner:
+        type: string
+        default: '"ubuntu-latest"'
+      mac_runner:
+        type: string
+        default: '"macos-latest"'
+
+      release:
+        description: Publish a GitHub Release. Off = build and keep the artifacts only.
+        type: boolean
+        default: true
+
+      prerelease:
+        description: Mark the release as a pre-release.
+        type: boolean
+        default: false
+
+      artifact_retention_days:
+        type: number
+        default: 14
+
+    secrets:
+      # Windows Authenticode. Without it the installer still works, but SmartScreen
+      # warns the first few hundred users that the publisher is unknown.
+      WINDOWS_CERT_BASE64:
+        required: false
+      WINDOWS_CERT_PASSWORD:
+        required: false
+
+      # Apple signing + notarisation. Without it macOS refuses to open the app
+      # from Finder and the user has to right-click → Open once.
+      MAC_CERT_BASE64:
+        required: false
+      MAC_CERT_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+
+    outputs:
+      version:
+        value: ${{ jobs.meta.outputs.version }}
+      tag:
+        value: ${{ jobs.meta.outputs.tag }}
+      release_url:
+        value: ${{ jobs.release.outputs.url }}
+
+permissions:
+  contents: read
+
+jobs:
+  # =============================================================
+  # META: version + which platforms to build
+  # =============================================================
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Derive version from git
+        id: version
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          set -euo pipefail
+          BASE=$(node -p "require('./package.json').version.split('.').slice(0,2).join('.')")
+          COUNT=$(git rev-list --count HEAD)
+          VERSION="${BASE}.${COUNT}"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION"    >> "$GITHUB_OUTPUT"
+          echo "Version : $VERSION  (package.json ${BASE}.x + ${COUNT} commits)"
+
+      - name: Build the platform matrix
+        id: matrix
+        shell: bash
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+          WIN_RUNNER: ${{ inputs.windows_runner }}
+          LINUX_RUNNER: ${{ inputs.linux_runner }}
+          MAC_RUNNER: ${{ inputs.mac_runner }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const runners = {
+              win:   JSON.parse(process.env.WIN_RUNNER),
+              linux: JSON.parse(process.env.LINUX_RUNNER),
+              mac:   JSON.parse(process.env.MAC_RUNNER),
+            };
+            // electron-builder’s own flag, plus a human name so the release notes
+            // can tell a person which file is theirs.
+            const flag  = { win: "--win", linux: "--linux", mac: "--mac" };
+            const label = { win: "Windows", linux: "Linux", mac: "macOS" };
+
+            const wanted = process.env.PLATFORMS.split(",").map(s => s.trim()).filter(Boolean);
+            const unknown = wanted.filter(p => !(p in runners));
+            if (unknown.length) {
+              console.log(`::error::unknown platform(s) ${unknown.join(", ")} — expected win, linux or mac`);
+              process.exit(1);
+            }
+            if (!wanted.length) {
+              console.log("::error::no platforms requested");
+              process.exit(1);
+            }
+
+            const include = wanted.map(p => ({ platform: p, runner: runners[p], flag: flag[p], label: label[p] }));
+            console.log("matrix=" + JSON.stringify({ include }));
+          ' >> "$GITHUB_OUTPUT"
+
+  # =============================================================
+  # BUILD: one installer per platform
+  # =============================================================
+  build:
+    needs: meta
+    strategy:
+      # One platform failing should not throw away the installers the others
+      # already produced — the release job publishes whatever arrived.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.meta.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.label }}
+
+    # Secrets cannot be tested in a step's `if`, but a job-level env can.
+    env:
+      HAS_WIN_CERT: ${{ secrets.WINDOWS_CERT_BASE64 != '' }}
+      HAS_MAC_CERT: ${{ secrets.MAC_CERT_BASE64 != '' }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working_directory }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working_directory }}
+        run: npm ci
+
+      # electron-builder stamps this into the installer's file name, the Windows
+      # file properties and the auto-update feed, so it has to be set before the
+      # build rather than patched into the artifacts afterwards.
+      - name: Stamp version ${{ needs.meta.outputs.version }}
+        working-directory: ${{ inputs.working_directory }}
+        run: npm version "${{ needs.meta.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Build renderer + main
+        working-directory: ${{ inputs.working_directory }}
+        run: npm run build
+
+      # node, not python or openssl: it is the one interpreter guaranteed to be
+      # on all three runners at this point, having just been installed above.
+      - name: Import Windows signing certificate
+        if: matrix.platform == 'win' && env.HAS_WIN_CERT == 'true'
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        env:
+          CERT: ${{ secrets.WINDOWS_CERT_BASE64 }}
+        run: |
+          node -e "require('fs').writeFileSync('cert.pfx', Buffer.from(process.env.CERT, 'base64'))"
+          echo "CSC_LINK=$(pwd)/cert.pfx" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=${{ secrets.WINDOWS_CERT_PASSWORD }}" >> "$GITHUB_ENV"
+
+      - name: Import Apple signing certificate
+        if: matrix.platform == 'mac' && env.HAS_MAC_CERT == 'true'
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        env:
+          CERT: ${{ secrets.MAC_CERT_BASE64 }}
+        run: |
+          node -e "require('fs').writeFileSync('cert.p12', Buffer.from(process.env.CERT, 'base64'))"
+          echo "CSC_LINK=$(pwd)/cert.p12" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=${{ secrets.MAC_CERT_PASSWORD }}" >> "$GITHUB_ENV"
+
+      # --publish never: this job produces files, the release job publishes them.
+      # The update metadata (latest*.yml) is still written because the repo's
+      # electron-builder config names a publish provider, and electron-updater
+      # needs those files on the release to see a new version at all.
+      - name: Package ${{ matrix.label }}
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        env:
+          # Unsigned is the default and is deliberate: an unsigned installer that
+          # exists beats a signed one that never got built. Auto-discovery off
+          # stops electron-builder from picking up an unrelated identity that
+          # happens to be in a self-hosted runner's keychain.
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.MAC_CERT_BASE64 != '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ github.token }}
+        run: npx --no-install electron-builder ${{ matrix.flag }} --publish never
+
+      - name: List what was produced
+        if: always()
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        run: ls -lh release/ 2>/dev/null || echo "(no release/ directory — the build did not get that far)"
+
+      # .blockmap and latest*.yml are not noise: electron-updater reads the yml
+      # to find a new version and the blockmap to download only what changed.
+      - name: Upload installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: installers-${{ matrix.platform }}
+          retention-days: ${{ inputs.artifact_retention_days }}
+          if-no-files-found: error
+          path: |
+            ${{ inputs.working_directory }}/release/*.exe
+            ${{ inputs.working_directory }}/release/*.msi
+            ${{ inputs.working_directory }}/release/*.dmg
+            ${{ inputs.working_directory }}/release/*.zip
+            ${{ inputs.working_directory }}/release/*.AppImage
+            ${{ inputs.working_directory }}/release/*.deb
+            ${{ inputs.working_directory }}/release/*.rpm
+            ${{ inputs.working_directory }}/release/*.blockmap
+            ${{ inputs.working_directory }}/release/latest*.yml
+
+  # =============================================================
+  # RELEASE: one release, holding every installer that built
+  # =============================================================
+  release:
+    if: inputs.release
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      url: ${{ steps.publish.outputs.url }}
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: installers-*
+          merge-multiple: true
+
+      - name: Publish ${{ needs.meta.outputs.tag }}
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          SIGNED: ${{ secrets.WINDOWS_CERT_BASE64 != '' || secrets.MAC_CERT_BASE64 != '' }}
+        run: |
+          set -euo pipefail
+
+          # -print0 throughout: a productName with a space in it — "eExtract
+          # Desktop Setup 0.1.42.exe" — is one file, not three arguments.
+          mapfile -t -d '' FILES < <(find artifacts -type f -print0 | sort -z)
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "::error::no installers were produced"
+            exit 1
+          fi
+          printf 'Attaching:\n'; printf '  %s\n' "${FILES[@]}"
+
+          # What a person needs in order to pick their own file, written from
+          # what actually built rather than from what was requested.
+          row() {
+            while IFS= read -r -d '' f; do
+              printf '| `%s` | %s |\n' "$(basename "$f")" "$2"
+            done < <(find artifacts -type f -name "$1" -print0)
+          }
+
+          NOTES=$(mktemp)
+          {
+            echo "Commit \`${GITHUB_SHA:0:7}\` on \`${GITHUB_REF_NAME}\`."
+            echo
+            echo "| Download | For |"
+            echo "| --- | --- |"
+            row '*.exe'      'Windows — run it, then Next through the installer'
+            row '*.dmg'      'macOS — open, drag to Applications'
+            row '*.AppImage' 'Linux — `chmod +x` and run, nothing to install'
+            row '*.deb'      'Debian / Ubuntu — `sudo apt install ./<file>`'
+            if [ "$SIGNED" != "true" ]; then
+              echo
+              echo "> These installers are not code-signed. Windows SmartScreen will say the publisher is unknown — choose **More info → Run anyway**. On macOS, right-click → **Open** the first time."
+            fi
+          } > "$NOTES"
+
+          ARGS=(--title "eExtract Desktop $VERSION" --notes-file "$NOTES" --target "$GITHUB_SHA")
+          # Not `[ ... ] && ARGS+=(...)`: under `set -e` a false test is a
+          # failed command and takes the whole step with it.
+          if [ "$PRERELEASE" = "true" ]; then ARGS+=(--prerelease); fi
+
+          # Re-running a workflow must not fail on a tag that already exists, and
+          # must not leave the previous run's files behind either.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — replacing its files"
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+          else
+            gh release create "$TAG" "${ARGS[@]}" "${FILES[@]}"
+          fi
+
+          URL=$(gh release view "$TAG" --json url --jq .url)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Released: $URL"
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "### ${{ needs.meta.outputs.tag }}"
+            echo
+            echo "${{ steps.publish.outputs.url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
