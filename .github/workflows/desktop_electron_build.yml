@@ -281,7 +281,13 @@ jobs:
   # RELEASE: one release, holding every installer that built
   # =============================================================
   release:
-    if: inputs.release
+    # `needs:` on its own means "and every one of them succeeded", which
+    # contradicts fail-fast:false above: one platform failing skipped this job
+    # and threw away the two installers that had already built. !cancelled()
+    # restores the intent — publish what arrived. If nothing did, the publish
+    # step below says so and fails, which is the honest outcome rather than a
+    # green run with an empty release.
+    if: ${{ inputs.release && !cancelled() && needs.meta.result == 'success' }}
     needs: [meta, build]
     runs-on: ubuntu-latest
     permissions:
@@ -306,6 +312,7 @@ jobs:
           VERSION: ${{ needs.meta.outputs.version }}
           PRERELEASE: ${{ inputs.prerelease }}
           SIGNED: ${{ secrets.WINDOWS_CERT_BASE64 != '' || secrets.MAC_CERT_BASE64 != '' }}
+          BUILD_RESULT: ${{ needs.build.result }}
         run: |
           set -euo pipefail
 
@@ -339,6 +346,13 @@ jobs:
             if [ "$SIGNED" != "true" ]; then
               echo
               echo "> These installers are not code-signed. Windows SmartScreen will say the publisher is unknown — choose **More info → Run anyway**. On macOS, right-click → **Open** the first time."
+            fi
+            # A missing row is indistinguishable from a platform nobody asked
+            # for. Anyone looking for their download deserves to know the
+            # difference between "not built" and "failed to build".
+            if [ "$BUILD_RESULT" != "success" ]; then
+              echo
+              echo "> ⚠️ Not every platform built for this version — see the [workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for which and why. The files above are the ones that did."
             fi
           } > "$NOTES"
 
