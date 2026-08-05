@@ -198,6 +198,17 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
         run: npm run build
 
+      # A hosted runner starts from nothing; a self-hosted one starts from
+      # whatever the last job left behind. release/ is gitignored, so
+      # actions/checkout does not touch it and last week's installers are still
+      # sitting exactly where the upload step globs — which puts two versions of
+      # the same .dmg on one release and makes the older one a coin toss away
+      # from being what a customer downloads.
+      - name: Clear previous build output
+        working-directory: ${{ inputs.working_directory }}
+        shell: bash
+        run: rm -rf release
+
       # node, not python or openssl: it is the one interpreter guaranteed to be
       # on all three runners at this point, having just been installed above.
       - name: Import Windows signing certificate
