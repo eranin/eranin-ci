@@ -58,6 +58,23 @@ on:
         type: number
         default: 14
 
+      # electron-updater reads latest.yml from wherever the app's publish config
+      # points. For a private repo that cannot be GitHub — its feed answers 404
+      # to a client with no token — so the installers are also copied to a
+      # static directory the app can reach anonymously.
+      feed_path:
+        description: "Directory on feed_runner to publish installers into. Empty = no feed."
+        type: string
+        default: ""
+      feed_runner:
+        description: "Runner with the feed directory mounted. JSON, like the others."
+        type: string
+        default: '["self-hosted","Linux","X64"]'
+      feed_keep:
+        description: "Versions to keep in the feed. Older ones are deleted."
+        type: number
+        default: 3
+
     secrets:
       # Windows Authenticode. Without it the installer still works, but SmartScreen
       # warns the first few hundred users that the publisher is unknown.
@@ -381,4 +398,99 @@ jobs:
             echo "### ${{ needs.meta.outputs.tag }}"
             echo
             echo "${{ steps.publish.outputs.url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # =============================================================
+  # FEED: the directory an installed copy checks for a newer one
+  # =============================================================
+  feed:
+    if: ${{ inputs.feed_path != '' && !cancelled() && needs.meta.result == 'success' }}
+    needs: [meta, build]
+    runs-on: ${{ fromJSON(inputs.feed_runner) }}
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: installers-*
+          merge-multiple: true
+
+      - name: Publish ${{ needs.meta.outputs.version }} to the feed
+        shell: bash
+        env:
+          FEED: ${{ inputs.feed_path }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          KEEP: ${{ inputs.feed_keep }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -d "$FEED" ]; then
+            echo "::error::feed_path $FEED does not exist on this runner"
+            exit 1
+          fi
+          if [ ! -w "$FEED" ]; then
+            echo "::error::feed_path $FEED is not writable by $(id -un)"
+            exit 1
+          fi
+
+          shopt -s nullglob
+          installers=(artifacts/*.exe artifacts/*.dmg artifacts/*.AppImage artifacts/*.deb artifacts/*.zip artifacts/*.blockmap)
+          manifests=(artifacts/latest*.yml)
+
+          if [ ${#installers[@]} -eq 0 ] || [ ${#manifests[@]} -eq 0 ]; then
+            echo "::error::nothing to publish — ${#installers[@]} installers, ${#manifests[@]} manifests"
+            exit 1
+          fi
+
+          # Installers first, manifests second, and never the other way round: a
+          # manifest naming a file that has not arrived yet sends every client
+          # that reads it to a 404, and they will not look again until the next
+          # check.
+          #
+          # Each installer lands under a temporary name and is moved into place,
+          # because a client downloading a half-written file gets a checksum
+          # mismatch rather than an error it can explain.
+          for f in "${installers[@]}"; do
+            name=$(basename "$f")
+            cp "$f" "$FEED/.tmp-$name"
+            mv -f "$FEED/.tmp-$name" "$FEED/$name"
+            echo "  installer  $name"
+          done
+
+          for f in "${manifests[@]}"; do
+            name=$(basename "$f")
+            cp "$f" "$FEED/.tmp-$name"
+            mv -f "$FEED/.tmp-$name" "$FEED/$name"
+            echo "  manifest   $name"
+          done
+
+          # Keep the last few versions. Older installers are dead weight — the
+          # manifests only ever name the current one — but not zero: a client
+          # part-way through a download of the previous version should be able
+          # to finish it.
+          #
+          # Versions are read off the filenames rather than a directory listing
+          # date, so a re-run that rewrites a file does not make it look new.
+          mapfile -t versions < <(
+            ls "$FEED" \
+              | sed -n 's/.*-\([0-9]\+\.[0-9]\+\.[0-9]\+\)-.*/\1/p' \
+              | sort -u -t. -k1,1n -k2,2n -k3,3n
+          )
+          total=${#versions[@]}
+          if [ "$total" -gt "$KEEP" ]; then
+            drop=$(( total - KEEP ))
+            for v in "${versions[@]:0:$drop}"; do
+              echo "  pruning    $v"
+              rm -f "$FEED"/*-"$v"-*
+            done
+          fi
+
+          {
+            echo "### Update feed"
+            echo
+            echo "Published \`$VERSION\`, keeping the last $KEEP versions."
+            echo
+            echo '```'
+            ls -lh "$FEED" | tail -n +2 | awk '{print $5, $9}'
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
