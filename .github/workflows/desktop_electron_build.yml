@@ -267,7 +267,26 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           GH_TOKEN: ${{ github.token }}
-        run: npx --no-install electron-builder ${{ matrix.flag }} --publish never
+        run: |
+          set -euo pipefail
+
+          # electron-builder only reaches for notarytool when it is handed a team
+          # ID. Given an Apple ID and an app-specific password without one — and
+          # `notarize: true` in a repo's config takes the same branch — it
+          # notarises through altool, which Apple switched off in November 2023,
+          # and the job dies on an error that names none of this. Passing the
+          # team ID on the command line rather than committing it keeps every
+          # repo's electron-builder config free of one organisation's identifiers.
+          EXTRA=""
+          if [ "${{ matrix.platform }}" = "mac" ] && [ -n "${APPLE_ID:-}" ]; then
+            if [ -z "${APPLE_TEAM_ID:-}" ]; then
+              echo "::error::APPLE_ID is set but APPLE_TEAM_ID is not — notarisation needs both, and the tool that runs without a team ID was decommissioned by Apple in 2023."
+              exit 1
+            fi
+            EXTRA="-c.mac.notarize.teamId=$APPLE_TEAM_ID"
+          fi
+
+          npx --no-install electron-builder ${{ matrix.flag }} --publish never $EXTRA
 
       - name: List what was produced
         if: always()
@@ -328,7 +347,12 @@ jobs:
           TAG: ${{ needs.meta.outputs.tag }}
           VERSION: ${{ needs.meta.outputs.version }}
           PRERELEASE: ${{ inputs.prerelease }}
-          SIGNED: ${{ secrets.WINDOWS_CERT_BASE64 != '' || secrets.MAC_CERT_BASE64 != '' }}
+          # One flag per platform, because they are separate purchases and a repo
+          # can easily hold one and not the other. Read as a single SIGNED, a
+          # Windows certificate silences the macOS warning as well, and the note
+          # that would have told a Mac user what to expect never gets printed.
+          WIN_SIGNED: ${{ secrets.WINDOWS_CERT_BASE64 != '' }}
+          MAC_SIGNED: ${{ secrets.MAC_CERT_BASE64 != '' }}
           BUILD_RESULT: ${{ needs.build.result }}
         run: |
           set -euo pipefail
@@ -350,19 +374,37 @@ jobs:
             done < <(find artifacts -type f -name "$1" -print0)
           }
 
+          # Whether anything matched, so that a note about opening the app on
+          # macOS is not printed onto a release that holds no macOS build. A
+          # command substitution rather than a pipe into grep -q: with pipefail
+          # on, grep closing the pipe early can leave find killed by SIGPIPE,
+          # which would turn a match into a failure.
+          built() { [ -n "$(find artifacts -type f -name "$1" -print -quit)" ]; }
+
           NOTES=$(mktemp)
           {
             echo "Commit \`${GITHUB_SHA:0:7}\` on \`${GITHUB_REF_NAME}\`."
             echo
             echo "| Download | For |"
             echo "| --- | --- |"
-            row '*.exe'      'Windows — run it, then Next through the installer'
-            row '*.dmg'      'macOS — open, drag to Applications'
-            row '*.AppImage' 'Linux — `chmod +x` and run, nothing to install'
-            row '*.deb'      'Debian / Ubuntu — `sudo apt install ./<file>`'
-            if [ "$SIGNED" != "true" ]; then
+            # One .dmg row, not one per architecture: electron-builder only puts
+            # the arch in the file name when a repo asks it to, and a glob for
+            # `*x64.dmg` silently drops the Intel row everywhere that did not.
+            row '*.exe'       'Windows — run it, then Next through the installer'
+            row '*.dmg'       'macOS — open, drag to Applications (`arm64` for Apple Silicon, `x64` for Intel)'
+            row '*.AppImage'  'Linux — `chmod +x` and run, nothing to install'
+            row '*.deb'       'Debian / Ubuntu — `sudo apt install ./<file>`'
+            # The .zip sits on the release because electron-updater's macOS path
+            # will not read a feed without one, and it looks exactly like a
+            # second, smaller download worth trying when the .dmg misbehaves.
+            row '*mac*.zip'   'Nothing — this is what the app’s own updater fetches. Use the `.dmg`.'
+            if [ "$WIN_SIGNED" != "true" ] && built '*.exe'; then
               echo
-              echo "> These installers are not code-signed. Windows SmartScreen will say the publisher is unknown — choose **More info → Run anyway**. On macOS, right-click → **Open** the first time."
+              echo "> The Windows installer is not code-signed, so SmartScreen will say the publisher is unknown — choose **More info → Run anyway**."
+            fi
+            if [ "$MAC_SIGNED" != "true" ] && built '*.dmg'; then
+              echo
+              echo "> The macOS build carries an ad-hoc signature rather than an Apple one, so it opens after one confirmation. **macOS 15 and later:** launch it, then open **System Settings → Privacy & Security**, scroll to the message naming the app and choose **Open Anyway**. **macOS 14 and earlier:** right-click the app → **Open**. macOS remembers the decision."
             fi
             # A missing row is indistinguishable from a platform nobody asked
             # for. Anyone looking for their download deserves to know the
