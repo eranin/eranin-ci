@@ -117,11 +117,21 @@ jobs:
             echo "::warning::Promoting to PRODUCTION at 100%. Consider status=inProgress with user_fraction=0.1 and ramping."
           fi
 
+      # A Python of our own, rather than the runner's system one. Ubuntu 24.04
+      # marks that interpreter PEP 668 "externally managed", so `pip install`
+      # into it — even with --user — fails outright with
+      # `error: externally-managed-environment`, and this step began failing on
+      # every promote the moment the runner image rolled forward.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Set up Python deps
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet --user --upgrade google-auth requests
+          python3 -m pip install --quiet --upgrade google-auth requests
           echo "google-auth + requests ready"
 
       - name: Decode service account JSON
