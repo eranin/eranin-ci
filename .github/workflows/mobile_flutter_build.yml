@@ -66,6 +66,24 @@ on:
         type: number
         default: 0
 
+      # Where the iOS marketing version (CFBundleShortVersionString) comes from.
+      #
+      # `version` above is <date>.<commit count>. That is fine as an Android
+      # versionName, which is cosmetic — but it is wrong for the App Store,
+      # where the version string must strictly increase for the life of the app
+      # and a build can only be attached to an App Store version whose string
+      # matches it exactly. Ship 20260810.472 once and every "1.0.x" after it is
+      # forfeited, because 1.0.36 now sorts below what is already released.
+      #
+      # true  = omit --build-name and let Flutter read `version:` out of
+      #         pubspec.yaml, so the store-facing number is bumped in one place
+      #         by a human. --build-number is still the commit count, which is
+      #         what CFBundleVersion actually needs (monotonic, unique).
+      # false = legacy: the date string on both platforms.
+      ios_version_from_pubspec:
+        type: boolean
+        default: false
+
       ios_codesign:
         type: boolean
         default: false
@@ -681,9 +699,13 @@ jobs:
           if [ -n "${{ inputs.target }}" ]; then
             ARGS="$ARGS -t ${{ inputs.target }}"
           fi
-          # Override CFBundleVersion / CFBundleShortVersionString from git
+          # CFBundleVersion is always the commit count: monotonic, unique, and
+          # the thing App Store Connect actually rejects duplicates of.
           ARGS="$ARGS --build-number=${{ needs.meta.outputs.build_number }}"
-          ARGS="$ARGS --build-name=${{ needs.meta.outputs.version }}"
+          # CFBundleShortVersionString: pubspec owns it unless told otherwise.
+          if [ "${{ inputs.ios_version_from_pubspec }}" != "true" ]; then
+            ARGS="$ARGS --build-name=${{ needs.meta.outputs.version }}"
+          fi
           echo "Running: flutter build ipa $ARGS"
           flutter build ipa $ARGS
 
@@ -700,7 +722,11 @@ jobs:
             ARGS="$ARGS -t ${{ inputs.target }}"
           fi
           ARGS="$ARGS --build-number=${{ needs.meta.outputs.build_number }}"
-          ARGS="$ARGS --build-name=${{ needs.meta.outputs.version }}"
+          # Same rule as the signed path, so an unsigned build reports the same
+          # version a signed one would.
+          if [ "${{ inputs.ios_version_from_pubspec }}" != "true" ]; then
+            ARGS="$ARGS --build-name=${{ needs.meta.outputs.version }}"
+          fi
           echo "Running: flutter build ios $ARGS"
           flutter build ios $ARGS
 
