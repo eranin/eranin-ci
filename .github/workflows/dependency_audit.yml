@@ -29,6 +29,27 @@ on:
         default: ""
 
 jobs:
+  # INTENTIONALLY UNBOUNDED — no timeout-minutes here, and that is not an
+  # oversight (ERA-207 audited every job in this repo).
+  #
+  # Two reasons it cannot be set and does not need to be:
+  #
+  #   1. Structurally impossible from our side. This job calls a reusable
+  #      workflow with `uses:`, and GitHub rejects timeout-minutes on such a
+  #      job — only name/uses/with/secrets/needs/if/permissions are allowed.
+  #      The key has to live on the job inside the called workflow, and
+  #      osv-scanner-reusable.yml@v2.3.1 exposes no timeout input to pass one
+  #      through (its inputs are scan-args, results-file-name,
+  #      download-artifact, upload-sarif, fail-on-vuln, matrix-property,
+  #      checkout-submodules and ref).
+  #
+  #   2. Low stakes anyway. Upstream hardcodes runs-on: ubuntu-latest, so a
+  #      hang burns GitHub-hosted minutes and does not occupy our shared
+  #      self-hosted node. Hosted runners also do get GitHub's 360-minute
+  #      default, which self-hosted ones demonstrably do not.
+  #
+  # If this ever needs a real ceiling, the route is an upstream PR adding a
+  # timeout input, or vendoring the scan into a normal job of our own.
   osv:
     permissions:
       actions: read
