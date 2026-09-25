@@ -27,6 +27,10 @@ on:
         type: string
         default: ""
 
+      timeout_minutes:
+        type: number
+        default: 60               # Ceiling for the whole build job; see below
+
     # ------------------------------------------------------------
     # Secrets from parent workflow
     # ------------------------------------------------------------
@@ -53,6 +57,22 @@ jobs:
   # =====================================================================
   build-and-push:
     runs-on: [self-hosted, Linux, X64]
+
+    # This pool is one shared machine, so a hung build does not just fail its
+    # own run — it holds the box while every other repo's build queues behind
+    # it. pharmacom-api-gateway run 35681553811 (2026-09-22) wedged inside
+    # `apk add` and sat there for 4h19m, until buildkitd was stopped out from
+    # under it ("received prior goaway ... graceful_stop"). Nothing ended that
+    # build; something else did, hours later.
+    #
+    # Without an explicit value GitHub applies its 360-minute default, which is
+    # sized for disposable hosted runners, not for a single self-hosted node.
+    # 60 is comfortably above what this job actually takes — the ten builds
+    # before that hang ran 9-10 minutes each, with one 46-minute outlier on
+    # 2026-09-17 as the node was already degrading — so it ends a hang in an
+    # hour instead of most of a day without truncating a legitimately slow
+    # build. Callers with genuinely longer builds can raise `timeout_minutes`.
+    timeout-minutes: ${{ inputs.timeout_minutes }}
 
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
