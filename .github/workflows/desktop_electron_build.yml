@@ -107,6 +107,25 @@ on:
 permissions:
   contents: read
 
+# UNBOUNDED, PENDING MEASUREMENT — none of the four jobs below sets
+# timeout-minutes. ERA-207 bounded every other self-hosted job in this repo
+# but deliberately stopped short here, because that ticket's rule was
+# "measure first, do not guess a ceiling", and this workflow has no history
+# to measure: an org-wide code search found ZERO callers of it. It has never
+# run, so there is no p90 to fit a number to.
+#
+# This is the riskiest remaining gap in the repo even so, and it should be
+# bounded before anyone wires up a caller. Note the `build` and `feed` jobs
+# take their runner from a caller-supplied input, and the documented values
+# include '["self-hosted","Windows","X64"]'. So the first caller that points
+# this at our own hardware reintroduces exactly the exposure ERA-207 closed:
+# an unbounded job on a shared box. Electron builds are also slow and
+# network-heavy (native rebuilds, code signing, notarization), which is the
+# profile most likely to wedge.
+#
+# Suggested approach when a caller appears: add per-job *_timeout_minutes
+# inputs matching the shape used in mobile_flutter_build.yml, seed them from
+# the first handful of real runs, then tighten.
 jobs:
   # =============================================================
   # META: version + which platforms to build
