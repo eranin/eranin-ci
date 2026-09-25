@@ -72,6 +72,20 @@ on:
         type: string
         default: "play-production"
 
+      # Ceiling for the job below, which runs on the shared self-hosted Linux
+      # box. Measured history is thin — only 2 completed promotions, the
+      # successful one taking 53s — so this default is deliberately loose
+      # rather than tight to that sample. See ERA-207.
+      #
+      # This does NOT eat into the `environment` approval wait above: a job
+      # held for required reviewers sits in "waiting" and has not been handed
+      # to a runner, and timeout-minutes only counts execution once it has.
+      # A reviewer can still take as long as they like.
+      timeout_minutes:
+        description: Ceiling for the promote job, excluding environment approval wait.
+        type: number
+        default: 20
+
     secrets:
       PLAY_SERVICE_ACCOUNT_JSON_BASE64:
         required: true
@@ -83,6 +97,7 @@ jobs:
   promote:
     name: Promote ${{ inputs.from_track }} → ${{ inputs.to_track }}
     runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: ${{ inputs.timeout_minutes }}
     environment: ${{ inputs.environment }}
 
     steps:
