@@ -97,6 +97,43 @@ on:
         type: string
         default: "app-store"
 
+      # ------------------------------------------------------------
+      # Job ceilings
+      #
+      # These jobs run on SELF-HOSTED runners — a single shared Linux box and
+      # a single shared macOS box. A hang there does not just burn minutes, it
+      # queues every other repo in the org behind it. GitHub's 360-minute
+      # default does not save us: on 2026-08-04 the `ios` job ran for exactly
+      # 24h00m00s before the hard limit cancelled it, holding the macOS runner
+      # for a full day (run 30889065516).
+      #
+      # Defaults below are per-job because the three jobs differ by two orders
+      # of magnitude. Each is derived from measured history, not a guess —
+      # see ERA-207. Callers can raise any of them.
+      # ------------------------------------------------------------
+
+      # Measured: median 21s, p90 42s, max 3m33s over 82 successes.
+      meta_timeout_minutes:
+        description: Ceiling for the versioning job.
+        type: number
+        default: 15
+
+      # Measured: median ~13m, p90 ~19m, max 31m04s over 86 successes.
+      # Trending UP — Aug runs were 10-18m, 2026-09-01 runs were 20-31m.
+      # 60 keeps ~2x margin on the slowest observed success at that trend.
+      android_timeout_minutes:
+        description: Ceiling for the Android build.
+        type: number
+        default: 60
+
+      # Measured: median ~3m30s, p90 ~4m30s, max 6m39s over 46 successes.
+      # 30 is deliberately loose relative to that spread, and still turns the
+      # 24-hour incident above into a 30-minute one.
+      ios_timeout_minutes:
+        description: Ceiling for the iOS build.
+        type: number
+        default: 30
+
     # ------------------------------------------------------------
     # Secrets
     # ------------------------------------------------------------
@@ -143,6 +180,7 @@ jobs:
   # =============================================================
   meta:
     runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: ${{ inputs.meta_timeout_minutes }}
     outputs:
       version: ${{ steps.version.outputs.version }}
       build_number: ${{ steps.version.outputs.build_number }}
@@ -180,6 +218,7 @@ jobs:
   android:
     if: inputs.platform == 'android' || inputs.platform == 'both'
     runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: ${{ inputs.android_timeout_minutes }}
     needs: meta
 
     steps:
@@ -456,6 +495,7 @@ jobs:
   ios:
     if: inputs.platform == 'ios' || inputs.platform == 'both'
     runs-on: [self-hosted, macOS, X64]
+    timeout-minutes: ${{ inputs.ios_timeout_minutes }}
     needs: meta
 
     steps:

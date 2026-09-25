@@ -94,6 +94,19 @@ on:
         type: boolean
         default: true
 
+      # Ceiling for the job below. It runs on the shared self-hosted Linux
+      # box, so a hang queues every other repo behind it rather than merely
+      # burning hosted minutes.
+      #
+      # Measured: median 2m47s but a very long tail — p90 10m46s and a
+      # slowest *successful* upload of 27m33s over 52 successes, because Play
+      # Console ingestion latency varies wildly. 60 keeps ~2x margin on that
+      # worst observed success. See ERA-207.
+      timeout_minutes:
+        description: Ceiling for the Play upload job.
+        type: number
+        default: 60
+
     # ------------------------------------------------------------
     # Secrets
     # ------------------------------------------------------------
@@ -108,6 +121,7 @@ jobs:
   deploy:
     name: Upload to Google Play (${{ inputs.track }})
     runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: ${{ inputs.timeout_minutes }}
 
     steps:
       # ------------------------------------------------------------

@@ -65,8 +65,13 @@ jobs:
     # under it ("received prior goaway ... graceful_stop"). Nothing ended that
     # build; something else did, hours later.
     #
-    # Without an explicit value GitHub applies its 360-minute default, which is
-    # sized for disposable hosted runners, not for a single self-hosted node.
+    # Do NOT count on a platform default catching this. An earlier draft of
+    # this comment claimed GitHub's 360-minute default would apply; measured
+    # history says otherwise on self-hosted runners. On 2026-08-04 the `ios`
+    # job in mobile_flutter_build.yml ran for exactly 24h00m00s before being
+    # cancelled (eTask-mobile run 30889065516) — four times past 360 minutes.
+    # An explicit ceiling is the only ceiling these jobs actually have.
+    #
     # 60 is comfortably above what this job actually takes — the ten builds
     # before that hang ran 9-10 minutes each, with one 46-minute outlier on
     # 2026-09-17 as the node was already degrading — so it ends a hang in an
