@@ -28,6 +28,10 @@ on:
         type: string
         default: ""
 
+# HOSTED-ONLY: google/osv-scanner-action's reusable workflow hardcodes
+# runs-on: ubuntu-latest, so a caller of this file uses GitHub-hosted minutes.
+# It has no callers today. Before adding one, vendor the scan into a normal
+# job on [self-hosted, Linux, X64] (e.g. the ghcr.io/google/osv-scanner image).
 jobs:
   # INTENTIONALLY UNBOUNDED — no timeout-minutes here, and that is not an
   # oversight (ERA-207 audited every job in this repo).

@@ -24,10 +24,13 @@ on:
         type: boolean
         default: true
 
+# CI runs on the org's self-hosted runners (eranin-runner, eranin-runner-2).
+# GitHub-hosted runners are not used: the org Actions budget is $10 with
+# stop-on-limit, and once spent every hosted job is refused (2026-09-29).
 jobs:
   secrets_scan:
     if: ${{ inputs.enable_gitleaks }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -47,7 +50,7 @@ jobs:
 
   iac_scan:
     if: ${{ inputs.enable_checkov }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     permissions:
       actions: read
@@ -77,7 +80,7 @@ jobs:
 
   codeql_scan:
     if: ${{ inputs.enable_codeql }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 45
     permissions:
       actions: read
