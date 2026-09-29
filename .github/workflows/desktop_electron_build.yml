@@ -34,12 +34,13 @@ on:
       # runs-on takes either a label or a list of them, and a workflow input can
       # only be a string — so these are JSON. '"windows-latest"' for a hosted
       # runner, '["self-hosted","Windows","X64"]' for one of ours.
-      # NOTE: the org has no Windows runner of its own, so a `win` build still
-      # needs GitHub-hosted minutes (and fails while the Actions budget is spent).
-      # Pass a self-hosted Windows runner here once there is one.
+      # The org has no Windows machine. By default the Windows installer is
+      # cross-built on our Linux runner inside electronuserland/builder:wine
+      # (NSIS runs under Wine), verified 2026-09-29 with eExtract-desktop.
+      # Pass '["self-hosted","Windows","X64"]' to build on a real Windows runner.
       windows_runner:
         type: string
-        default: '"windows-latest"'
+        default: '["self-hosted","Linux","X64"]'
       linux_runner:
         type: string
         # Ours: hosted runners are off for this org (Actions budget, 2026-09-29).
@@ -195,7 +196,13 @@ jobs:
               process.exit(1);
             }
 
-            const include = wanted.map(p => ({ platform: p, runner: runners[p], flag: flag[p], label: label[p] }));
+            // A Windows build scheduled on a Linux runner is cross-built in the
+            // electron-builder Wine image; everything else runs on the host.
+            const onLinux = r => JSON.stringify(r).includes("Linux") || JSON.stringify(r).includes("ubuntu");
+            const include = wanted.map(p => ({
+              platform: p, runner: runners[p], flag: flag[p], label: label[p],
+              wine: p === "win" && onLinux(runners[p]),
+            }));
             console.log("matrix=" + JSON.stringify({ include }));
           ' >> "$GITHUB_OUTPUT"
 
@@ -262,7 +269,8 @@ jobs:
           CERT: ${{ secrets.WINDOWS_CERT_BASE64 }}
         run: |
           node -e "require('fs').writeFileSync('cert.pfx', Buffer.from(process.env.CERT, 'base64'))"
-          echo "CSC_LINK=$(pwd)/cert.pfx" >> "$GITHUB_ENV"
+          # Inside the Wine container the working directory is mounted at /project.
+          if [ "${{ matrix.wine }}" = "true" ]; then echo "CSC_LINK=/project/cert.pfx" >> "$GITHUB_ENV"; else echo "CSC_LINK=$(pwd)/cert.pfx" >> "$GITHUB_ENV"; fi
           echo "CSC_KEY_PASSWORD=${{ secrets.WINDOWS_CERT_PASSWORD }}" >> "$GITHUB_ENV"
 
       - name: Import Apple signing certificate
@@ -312,7 +320,24 @@ jobs:
             EXTRA="-c.mac.notarize.teamId=$APPLE_TEAM_ID"
           fi
 
-          npx --no-install electron-builder ${{ matrix.flag }} --publish never $EXTRA
+          if [ "${{ matrix.wine }}" = "true" ]; then
+            # Windows installer from Linux: same node_modules and build output,
+            # packaged by electron-builder inside its Wine image. Caches live in
+            # the runner's home so Electron/NSIS are downloaded once per host.
+            mkdir -p "$HOME/.cache/electron" "$HOME/.cache/electron-builder"
+            docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -e HOME=/tmp/home -e CI=true \
+              -e ELECTRON_CACHE=/cache/electron -e ELECTRON_BUILDER_CACHE=/cache/electron-builder \
+              -e CSC_LINK -e CSC_KEY_PASSWORD -e GH_TOKEN \
+              -v "$HOME/.cache/electron:/cache/electron" \
+              -v "$HOME/.cache/electron-builder:/cache/electron-builder" \
+              -v "$PWD:/project" -w /project \
+              electronuserland/builder:wine \
+              npx --no-install electron-builder ${{ matrix.flag }} --x64 --publish never $EXTRA
+          else
+            npx --no-install electron-builder ${{ matrix.flag }} --publish never $EXTRA
+          fi
 
       - name: List what was produced
         if: always()
