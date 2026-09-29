@@ -488,6 +488,11 @@ jobs:
             ${{ inputs.working_directory }}/**/build/**/outputs/**/*.aab
             !${{ inputs.working_directory }}/**/android/**/build/**/outputs/**/*.apk
           if-no-files-found: error
+          # ~300 MB per build. The default 90-day retention made mobile builds
+          # 87% of the org's Actions storage bill (19,459 GB-h in 2026-09),
+          # which with the $10 stop-on-limit budget blocked every hosted job.
+          # Store uploads happen within minutes of the build; 14 days is ample.
+          retention-days: 14
 
   # =============================================================
   # IOS BUILD
@@ -778,6 +783,7 @@ jobs:
           path: |
             **/build/ios/ipa/*.ipa
           if-no-files-found: error
+          retention-days: 14
 
       - name: Upload iOS Artifact (No Codesign)
         if: "!inputs.ios_codesign || inputs.build_type != 'release' || steps.ios_signing.outputs.signing_configured != 'true'"
@@ -787,6 +793,7 @@ jobs:
           path: |
             **/build/ios/iphoneos/*.app
           if-no-files-found: warn
+          retention-days: 14
 
       - name: Cleanup Keychain
         if: always() && inputs.ios_codesign && inputs.build_type == 'release'
