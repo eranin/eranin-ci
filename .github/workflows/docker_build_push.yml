@@ -122,26 +122,33 @@ jobs:
       # ------------------------------------------------------------
       # 4) Setup Buildx builder (multi-platform)
       # ------------------------------------------------------------
+      # One builder per job. Two self-hosted runners share this Docker host, and
+      # a fixed name ("builder", removed then recreated at the start of every
+      # job) let one job delete the BuildKit container another job was still
+      # building in: "failed to receive status ... EOF / graceful_stop"
+      # (eTask-backend deploy-qa, 2026-09-29). The config also moves out of the
+      # shared /tmp/buildx into this job's RUNNER_TEMP.
       - name: Setup Buildx
+        id: buildx
         run: |
           HOST="${{ secrets.REGISTRY_URL }}"
-          mkdir -p /tmp/buildx
+          NAME="ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}-${RUNNER_NAME}"
+          NAME=$(printf '%s' "$NAME" | tr -c 'a-zA-Z0-9_-' '-' | cut -c1-60)
+          CONF="$RUNNER_TEMP/buildkit.toml"
 
-          cat <<EOF > /tmp/buildx/buildkit.toml
+          cat <<EOF > "$CONF"
           [registry."$HOST"]
             http = true
             insecure = true
           EOF
 
-          docker buildx rm builder || true
-
           docker buildx create \
-            --name builder \
+            --name "$NAME" \
             --driver docker-container \
-            --use \
-            --config /tmp/buildx/buildkit.toml
+            --config "$CONF"
 
-          docker buildx inspect --bootstrap
+          docker buildx inspect "$NAME" --bootstrap
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
       # ------------------------------------------------------------
       # 5) Docker login (force HTTP)
@@ -193,10 +200,18 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           build-args: ${{ inputs.build_args }}
+          builder: ${{ steps.buildx.outputs.name }}
 
       # ------------------------------------------------------------
       # 8) Summary (GitHub UI)
       # ------------------------------------------------------------
+      # Remove this job's builder (and its BuildKit container) even on failure.
+      # Layer cache lives in the builder, so the next job starts cold, which is
+      # the price of isolation; the registry-side layers are still reused on push.
+      - name: Remove Buildx builder
+        if: ${{ always() && steps.buildx.outputs.name != '' }}
+        run: docker buildx rm --force "${{ steps.buildx.outputs.name }}" || true
+
       - name: Summary
         run: |
           echo "## Docker Build Completed" >> $GITHUB_STEP_SUMMARY
