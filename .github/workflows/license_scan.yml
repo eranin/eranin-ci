@@ -146,6 +146,8 @@ jobs:
 
       - name: Upload License Report
         if: ${{ always() }}
+        # Report upload: never fail the gate on it (e.g. storage quota).
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: license-report-${{ inputs.runtime }}

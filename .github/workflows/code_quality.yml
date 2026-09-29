@@ -199,6 +199,8 @@ jobs:
 
       - name: Upload Coverage Artifacts (best-effort)
         if: ${{ inputs.run_coverage }}
+        # Report upload: never fail the gate on it (e.g. storage quota).
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: coverage-${{ inputs.runtime }}
