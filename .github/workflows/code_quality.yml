@@ -55,9 +55,12 @@ on:
         description: pass | fail
         value: ${{ jobs.quality.outputs.quality_status }}
 
+# CI runs on the org's self-hosted runners (eranin-runner, eranin-runner-2).
+# GitHub-hosted runners are not used: the org Actions budget is $10 with
+# stop-on-limit, and once spent every hosted job is refused (2026-09-29).
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
     outputs:
       quality_status: ${{ steps.set_outputs.outputs.quality_status }}
@@ -73,8 +76,8 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
-          cache-dependency-path: ${{ inputs.working_directory }}/package-lock.json
+          # no `cache: npm` on self-hosted runners: ~/.npm persists on the host,
+          # and the GitHub cache round-trip is slow and counts toward the quota.
 
       - name: Setup Python
         if: ${{ inputs.runtime == 'python' }}

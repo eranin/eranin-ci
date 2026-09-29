@@ -34,12 +34,16 @@ on:
       # runs-on takes either a label or a list of them, and a workflow input can
       # only be a string — so these are JSON. '"windows-latest"' for a hosted
       # runner, '["self-hosted","Windows","X64"]' for one of ours.
+      # NOTE: the org has no Windows runner of its own, so a `win` build still
+      # needs GitHub-hosted minutes (and fails while the Actions budget is spent).
+      # Pass a self-hosted Windows runner here once there is one.
       windows_runner:
         type: string
         default: '"windows-latest"'
       linux_runner:
         type: string
-        default: '"ubuntu-latest"'
+        # Ours: hosted runners are off for this org (Actions budget, 2026-09-29).
+        default: '["self-hosted","Linux","X64"]'
       mac_runner:
         type: string
         default: '"macos-latest"'
@@ -126,12 +130,15 @@ permissions:
 # Suggested approach when a caller appears: add per-job *_timeout_minutes
 # inputs matching the shape used in mobile_flutter_build.yml, seed them from
 # the first handful of real runs, then tighten.
+# CI runs on the org's self-hosted runners (eranin-runner, eranin-runner-2).
+# GitHub-hosted runners are not used: the org Actions budget is $10 with
+# stop-on-limit, and once spent every hosted job is refused (2026-09-29).
 jobs:
   # =============================================================
   # META: version + which platforms to build
   # =============================================================
   meta:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -216,8 +223,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
-          cache-dependency-path: ${{ inputs.working_directory }}/package-lock.json
+          # no `cache: npm` on self-hosted runners: ~/.npm persists on the host,
+          # and the GitHub cache round-trip is slow and counts toward the quota.
 
       - name: Install dependencies
         working-directory: ${{ inputs.working_directory }}
@@ -344,7 +351,7 @@ jobs:
     # green run with an empty release.
     if: ${{ inputs.release && !cancelled() && needs.meta.result == 'success' }}
     needs: [meta, build]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
     outputs:

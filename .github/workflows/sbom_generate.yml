@@ -24,9 +24,12 @@ on:
         type: boolean
         default: false
 
+# CI runs on the org's self-hosted runners (eranin-runner, eranin-runner-2).
+# GitHub-hosted runners are not used: the org Actions budget is $10 with
+# stop-on-limit, and once spent every hosted job is refused (2026-09-29).
 jobs:
   sbom:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     permissions:
       contents: read
